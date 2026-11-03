@@ -292,6 +292,10 @@ Sin variables se conservan los modelos predeterminados de cada runtime. Codex re
 - `cwd` por tarea: el modelo puede indicarlo cuando nombras otro proyecto. Debe estar dentro del `cwd` de Pi o de `PI_ORCHESTRATOR_ALLOWED_ROOTS` (rutas absolutas separadas por `:`). Las subtareas heredan el directorio del padre.
 - Reintento automático: un fallo transitorio del proveedor (capacidad, sobrecarga, 5xx) o de red se reintenta **una vez** tras 5 s, solo si la tarea es de solo lectura, no lanzó subtareas y no fue cancelada. Los tokens de los dos intentos se suman. Medido: Codex devolvió `Selected model is at capacity` en una ejecución real de la matriz.
 
+## Continuar una sesión
+
+`orchestrator_continue` (y `r` en el panel) envía un seguimiento a la **misma sesión nativa** de una tarea completada: los hilos de Codex (`thread/resume`; ya no son efímeros) y las sesiones de Antigravity. Se ofrece cuando el resultado lleva `continuable: true`, nunca para YOLO. Medido con la misma pregunta de seguimiento sobre Codex: 18 309 tokens de entrada (261 sin caché) frente a 36 149 (18 357 sin caché) de una tarea nueva, 6 s frente a 8 s, y la misma respuesta correcta. En un hilo reanudado Codex informa totales acumulados del hilo: cada continuación registra solo su parte. En una prueba real de extremo a extremo, el modelo principal eligió `orchestrator_continue` por sí mismo para el seguimiento.
+
 ## Historial por defecto
 
 La extensión guarda el historial en `~/.pi/agent/orchestrator-state` (directorio 0700, archivos 0600). `PI_ORCHESTRATOR_STATE_DIR` elige otro directorio y `PI_ORCHESTRATOR_STATE_DIR=off` lo desactiva. Retención: se conservan los 100 runs más recientes; solo se borran runs más antiguos con cierre registrado y archivo válido (nunca runs sin cierre, que podrían seguir vivos, ni archivos inválidos). La actividad se escribe en disco como mucho cada 5 s por tarea (medido en una tarea real de Codex: 18 → 11 escrituras); el cierre de cada tarea siempre se escribe.

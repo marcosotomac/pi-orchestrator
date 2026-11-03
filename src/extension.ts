@@ -75,7 +75,12 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
     // `details` keeps the full TaskView for the TUI renderers.
     const ledger = new DeliveryLedger();
     const reply = (data: unknown, model: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(model) }], details: data });
-    const once = (task: TaskView) => modelTask(task, ledger.take(task));
+    let coreRef: Awaited<ReturnType<typeof createService>>["core"] | undefined;
+    // `continuable`: the model may follow up in the same native session (cheaper than a fresh task).
+    const hints = (task: TaskView, view: Record<string, unknown>) => {
+      try { return coreRef?.controls(null, task.id).resumeReady ? { ...view, continuable: true } : view; } catch { return view; }
+    };
+    const once = (task: TaskView) => hints(task, modelTask(task, ledger.take(task)));
     // Hosts that outlive a turn (TUI, RPC) can wake the model when a batch ends,
     // so it need not block in orchestrator_wait. Print/JSON runs end with the turn.
     const deferred = () => latestContext?.mode === "tui" || latestContext?.mode === "rpc";
@@ -216,7 +221,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
             }
           }
         },
-      }).catch((error) => { service = undefined; throw error; });
+      }).then((created) => { coreRef = created.core; return created; }).catch((error) => { service = undefined; throw error; });
     };
 
     pi.on("session_start", () => { active = true; });
@@ -295,10 +300,10 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
 
     // Presentation only: preserve structured tool results and model-facing JSON.
     pi.registerToolRenderer?.((name, next) => {
-      if (!["orchestrator_delegate", "orchestrator_status", "orchestrator_wait", "orchestrator_cancel"].includes(name)) return next();
+      if (!["orchestrator_delegate", "orchestrator_status", "orchestrator_wait", "orchestrator_cancel", "orchestrator_continue"].includes(name)) return next();
       return {
         renderCall(args, theme) {
-          const action = { orchestrator_delegate: "Delegar", orchestrator_status: "Consultar", orchestrator_wait: "Esperar", orchestrator_cancel: "Cancelar" }[name];
+          const action = { orchestrator_delegate: "Delegar", orchestrator_status: "Consultar", orchestrator_wait: "Esperar", orchestrator_cancel: "Cancelar", orchestrator_continue: "Continuar" }[name];
           const input = args && typeof args === "object" ? args as Record<string, unknown> : {};
           const target = name === "orchestrator_delegate" ? [input.engine, input.model, input.thinking].filter((value) => typeof value === "string").join(" · ") : typeof input.taskId === "string" ? input.taskId.slice(0, 8) : "tareas";
           return new Text(theme.fg("accent", `${action} · ${safeText(target)}`), 0, 0);
@@ -399,6 +404,21 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
       async execute(_id, params, _signal, _update, ctx) { const task = await (await get(ctx)).core.cancel(null, params.taskId); return reply(task, once(task)); },
     }));
 
+    pi.registerTool(defineTool({
+      name: "orchestrator_continue", label: "Continue runtime session",
+      description: "Follow up on a completed task in the SAME native session (Codex threads, Antigravity sessions), when its result has `continuable: true`. The runtime keeps everything it already read, so this is much cheaper than a fresh orchestrator_delegate for follow-ups like 'now fix what you found' or 'explain line X'. Same engine, model and permission mode (restricted only; YOLO sessions cannot be continued). Returns a new task id; its result arrives like any other delegated task.",
+      parameters: Type.Object({ taskId: Type.String(), prompt: Type.String({ minLength: 1, maxLength: 32_000 }), requestKey: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })) }),
+      async execute(callId, params, signal, _update, ctx) {
+        signal?.throwIfAborted();
+        const { core } = await get(ctx);
+        const source = resolveTask(core.list(), params.taskId);
+        const task = core.resume(null, source.id, params.prompt, params.requestKey ?? callId);
+        if (!toolTasks.has(task.id)) toolTasks.set(task.id, agentRun);
+        latestContext = ctx;
+        return reply(task, { ...once(task), next: deferred() ? NEXT_DEFERRED : NEXT_BLOCKING });
+      },
+    }));
+
     /** Runs a panel action. Returns true when the panel should reopen. */
     const panelAction = async (action: PanelAction, ctx: ExtensionContext, core: Awaited<ReturnType<typeof createService>>["core"]): Promise<boolean> => {
       const task = tasks().find((entry) => entry.id === action.taskId);
@@ -415,7 +435,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
             return true;
           }
           case "resume": {
-            const value = (await ctx.ui.input("Reanudar la sesión de Antigravity", "Instrucción para continuar…"))?.trim();
+            const value = (await ctx.ui.input(`Continuar la sesión de ${task.engine}`, "Instrucción para continuar…"))?.trim();
             if (!value) return true;
             message(core.resume(null, task.id, value, randomUUID()));
             return true;

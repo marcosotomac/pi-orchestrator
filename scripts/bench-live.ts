@@ -31,8 +31,23 @@ for (let run = 1; run <= Number(runsArg ?? 1); run++) {
     ? "/orch Analiza este repo con tres tareas en paralelo: (1) claude: qué función devuelve NaN con un array vacío; (2) codex: si algún secreto o token se escribe en logs; (3) claude: si median es correcta para arrays de longitud par. Al final dame un resumen con archivo:línea de cada hallazgo."
     : "¿Qué valor tiene MARKER en notes.txt?";
   let firstReturn = 0;
+  const settleAll = async () => {
+    const live = () => session.sessionManager.getBranch().filter((e: any) => e.type === "custom" && e.customType === "orchestrator-event").map((e: any) => e.data.task).reduce((m: Map<string, any>, t: any) => m.set(t.id, t), new Map()).values();
+    for (let quiet = 0; quiet < 8;) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const pending = [...live()].some((t: any) => !["completed", "failed", "cancelled"].includes(t.state));
+      quiet = pending || session.isStreaming ? 0 : quiet + 1;
+    }
+    await session.waitForIdle();
+  };
+  let phaseStart = 0;
+  if (scenario === "followup") {
+    await session.prompt("/orch codex con thinking low: lee src/math.ts y src/auth.ts y resume en dos líneas qué hace cada función.");
+    await session.waitForIdle(); await settleAll();
+    phaseStart = (session.messages as any[]).length;
+  }
   try {
-    await session.prompt(prompt);
+    await session.prompt(scenario === "followup" ? "Pregúntale a esa misma tarea de codex qué función falla con un array vacío y en qué archivo:línea." : prompt);
     await session.waitForIdle();
     firstReturn = Date.now() - t0;
     // Non-blocking flows wake the agent later: wait until no task is live and the agent is idle.
@@ -49,6 +64,7 @@ for (let run = 1; run <= Number(runsArg ?? 1); run++) {
   const msgs = session.messages as any[];
   const assistants = msgs.filter((m) => m.role === "assistant");
   const main = assistants.reduce((a, m) => ({ input: a.input + (m.usage?.input ?? 0) + (m.usage?.cacheRead ?? 0) + (m.usage?.cacheWrite ?? 0), cached: a.cached + (m.usage?.cacheRead ?? 0), output: a.output + (m.usage?.output ?? 0) }), { input: 0, cached: 0, output: 0 });
+  const phaseTools = (msgs.slice(phaseStart) as any[]).filter((m) => m.role === "assistant").flatMap((m) => m.content.filter((c: any) => c.type === "toolCall").map((c: any) => c.name));
   const toolCalls = assistants.flatMap((m) => m.content.filter((c: any) => c.type === "toolCall").map((c: any) => c.name));
   const events = session.sessionManager.getBranch().filter((e: any) => e.type === "custom" && e.customType === "orchestrator-event").map((e: any) => e.data);
   const settled = new Map(events.filter((e: any) => e.type === "settled").map((e: any) => [e.task.id, e.task]));
@@ -56,12 +72,12 @@ for (let run = 1; run <= Number(runsArg ?? 1); run++) {
   const final = assistants.map((m) => m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("")).join("\n---\n");
   const lastText = assistants.at(-1)?.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") ?? "";
   const emptyTurns = assistants.filter((m) => /ya (est[aá]|fue) (incluido|entregado)|already (included|delivered)|Resultado ya incluido/i.test(m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join(""))).length;
-  const checks = scenario === "fanout"
+  const checks = scenario === "followup" ? { nan: /average/.test(final) && /math\.ts:?\s*(L)?[67]\b/.test(final), usedContinue: phaseTools.includes("orchestrator_continue") } : scenario === "fanout"
     ? { nan: /average/.test(final) && /math\.ts:?\s*(L)?[67]\b/.test(final), secret: /auth\.ts:?\s*(L)?5\b/.test(final), median: /median/.test(final) && /math\.ts:?\s*(L)?1[0-2]\b/.test(final) }
     : { marker: /violeta-42/.test(final) };
   const evidence = tasks.filter((t) => /\b[\w/.-]+\.ts:\d+/.test(t.result ?? "")).length;
   const row = { label, scenario, run, totalS: Math.round(total / 1000), chatBlockedS: Math.round(blockedMs / 1000), firstReturnS: Math.round(firstReturn / 1000),
-    mainTurns: assistants.length, mainInput: main.input, mainCached: main.cached, mainOutput: main.output, toolCalls,
+    mainTurns: assistants.length, phaseTools, mainInput: main.input, mainCached: main.cached, mainOutput: main.output, toolCalls,
     workers: tasks.map((t) => ({ engine: t.engine, state: t.state, model: t.modelState?.model ?? t.selection?.model ?? "default", tokens: t.usage ? t.usage.inputTokens + t.usage.outputTokens : null, costUsd: t.usage?.costUsd ?? null, seconds: Math.round((Date.parse(t.endedAt) - Date.parse(t.createdAt)) / 1000), evidence: /\b[\w/.-]+\.ts:\d+/.test(t.result ?? "") })),
     workerTokens: tasks.reduce((a, t) => a + (t.usage ? t.usage.inputTokens + t.usage.outputTokens : 0), 0), workerCostUsd: Number(tasks.reduce((a, t) => a + (t.usage?.costUsd ?? 0), 0).toFixed(4)),
     checks, correct: Object.values(checks).filter(Boolean).length + "/" + Object.keys(checks).length, evidenceRate: tasks.length ? `${evidence}/${tasks.length}` : "-", errors, emptyTurns, lastText: lastText.slice(0, 200), final: final.slice(0, 1500) };

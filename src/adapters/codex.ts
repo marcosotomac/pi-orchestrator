@@ -37,7 +37,9 @@ async function listMcpServers(request: (method: string, params: unknown) => Prom
 
 /** Dedicated app-server per attempt. Own authentication is inherited from Codex, not Pi. */
 export class CodexAdapter implements RuntimeAdapter {
-  capabilities = { ...capabilities, steer: true };
+  // resume: thread/resume of a persisted (non-ephemeral) thread, for follow-ups that
+  // reuse the context instead of paying the full fixed cost again.
+  capabilities = { ...capabilities, steer: true, resume: true };
 
   constructor(private readonly executable = "codex") {}
 
@@ -163,12 +165,15 @@ export class CodexAdapter implements RuntimeAdapter {
       // config/read, not a global mcpServerStatus/list: the latter carries every
       // app/tool definition (~2.5 MB measured) and exceeds the protocol line bound.
       const disabled = await configuredMcpServers(request, context.task.cwd);
-      const started = await request("thread/start", {
+      const resuming = Boolean(context.resumeSessionId);
+      const started = await request(resuming ? "thread/resume" : "thread/start", {
+        ...(resuming ? { threadId: context.resumeSessionId, excludeTurns: true } : {}),
         cwd: context.task.cwd,
         // YOLO writes stay inside the task directory (its worktree) unless the operator opted out.
         sandbox: yolo ? yoloSandbox() === "off" ? "danger-full-access" : "workspace-write" : "read-only",
         approvalPolicy: "never",
-        ephemeral: true,
+        // Persisted so the operator (or the coordinating model) can continue it.
+        ...(resuming ? {} : { ephemeral: false }),
         ...(context.task.selection?.model ? { model: context.task.selection.model } : {}),
         developerInstructions: `${yolo ? "The operator authorized unattended tool execution for this task only. Follow the task scope; do not request tool approvals." : "You are a read-only worker controlled by Pi. Do not modify files."} Use only the pi_orchestrator MCP tools for delegation. Delegate only if your task explicitly asks. Do not use native subagents, grant yourself or children additional permissions, ask the human directly, or expose credentials. A running child is not a result: wait until it settles. Report failed/cancelled children honestly. ${WORKER_CONTRACT}`,
         config: {
@@ -198,6 +203,7 @@ export class CodexAdapter implements RuntimeAdapter {
         },
       });
       if (typeof started?.thread?.id !== "string" || !started.thread.id) throw new Error("Codex returned no thread id");
+      if (resuming && started.thread.id !== context.resumeSessionId) throw new Error("Codex resumed a different thread");
       threadId = String(started.thread.id);
       context.session(threadId);
       if (typeof started.model === "string" && started.model) {

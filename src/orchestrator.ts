@@ -52,6 +52,10 @@ interface Entry {
   workspace?: IsolatedWorkspace;
   /** Usage of earlier automatic attempts, added to the current attempt's counters. */
   usageCarry?: TaskUsage;
+  /** Last raw counters from the runtime (a resumed Codex thread reports thread-wide totals). */
+  rawUsage?: TaskUsage;
+  /** Thread total already attributed to the source task: subtracted for a continuation. */
+  usageBaseline?: TaskUsage;
 }
 
 export interface OrchestratorOptions {
@@ -193,7 +197,11 @@ export class Orchestrator {
     const source = this.entry(sourceId);
     if (source.view.permissionMode === "yolo") throw new Error("Native resume of YOLO sessions is unsupported; authorize a fresh task instead");
     if (source.view.state !== "completed" || source.cleanupFailed || !source.view.runtimeProcess?.exitedAt || !source.nativeSessionId || !this.options.adapters[source.view.engine]!.capabilities.resume) throw new Error("Native resume is unsupported or the source has no verified clean completion in this live coordinator");
-    return this.admit(null, source.view.engine, prompt, requestKey, undefined, source.nativeSessionId, { taskId: source.view.id, attemptId: source.view.attemptId }, { ...source.view.selection, ...(source.view.modelState?.model ? { model: source.view.modelState.model } : {}), ...(source.view.modelState?.thinking ? { thinking: source.view.modelState.thinking } : {}) });
+    const continuation = this.admit(null, source.view.engine, prompt, requestKey, undefined, source.nativeSessionId, { taskId: source.view.id, attemptId: source.view.attemptId }, { ...source.view.selection, ...(source.view.modelState?.model ? { model: source.view.modelState.model } : {}), ...(source.view.modelState?.thinking ? { thinking: source.view.modelState.thinking } : {}) }, undefined, source.view.cwd === this.cwd ? undefined : source.view.cwd);
+    // Set before the queued microtask launches the runtime. A reused requestKey keeps its own baseline.
+    const entry = this.entry(continuation.id);
+    if (!entry.started || entry.view.state === "running") entry.usageBaseline ??= source.rawUsage ? { ...source.rawUsage } : undefined;
+    return continuation;
   }
 
   private admit(callerId: string | null, engine: Engine, prompt: string, requestKey: string, recoverySource?: RecoverySource, resumeSessionId?: string, continuationSource?: { taskId: string; attemptId: string }, requestedSelection?: ModelSelection, requestedPermissionMode?: PermissionMode, requestedCwd?: string): TaskView {
@@ -322,8 +330,17 @@ export class Orchestrator {
         mcp: { url: this.endpoint!, token },
         usage: (usage) => {
           if (isTerminal(entry.view) || !this.identities.has(entry.tokenHash)) return;
-          const clean = validUsage(usage);
-          if (!clean) return; // Malformed provider counters are ignored, never displayed.
+          const raw = validUsage(usage);
+          if (!raw) return; // Malformed provider counters are ignored, never displayed.
+          entry.rawUsage = raw;
+          const base = entry.usageBaseline;
+          // Measured: a resumed thread's totals include the earlier turns; count only this task's share.
+          const clean: TaskUsage = base ? {
+            inputTokens: Math.max(0, raw.inputTokens - base.inputTokens), cachedInputTokens: Math.max(0, raw.cachedInputTokens - base.cachedInputTokens), outputTokens: Math.max(0, raw.outputTokens - base.outputTokens),
+            ...(raw.reasoningTokens !== undefined ? { reasoningTokens: Math.max(0, raw.reasoningTokens - (base.reasoningTokens ?? 0)) } : {}),
+            ...(raw.costUsd !== undefined ? { costUsd: Math.max(0, raw.costUsd - (base.costUsd ?? 0)) } : {}),
+          } : raw;
+          if (clean.cachedInputTokens > clean.inputTokens) clean.cachedInputTokens = clean.inputTokens;
           const carry = entry.usageCarry;
           entry.view.usage = carry ? {
             inputTokens: carry.inputTokens + clean.inputTokens, cachedInputTokens: carry.cachedInputTokens + clean.cachedInputTokens, outputTokens: carry.outputTokens + clean.outputTokens,
@@ -509,7 +526,7 @@ export class Orchestrator {
   controls(callerId: string | null, id: string) {
     this.authorize(callerId, id);
     const entry = this.entry(id);
-    return { ...this.options.adapters[entry.view.engine]!.capabilities, steerReady: this.options.adapters[entry.view.engine]!.capabilities.steer && entry.view.state === "running" && this.identities.has(entry.tokenHash) && Boolean(entry.controls?.steer), resumeReady: entry.view.state === "completed" && !entry.cleanupFailed && Boolean(entry.nativeSessionId && entry.view.runtimeProcess?.exitedAt) && Boolean(this.options.adapters[entry.view.engine]!.capabilities.resume) && !this.sessionLeases.has(entry.nativeSessionId!) };
+    return { ...this.options.adapters[entry.view.engine]!.capabilities, steerReady: this.options.adapters[entry.view.engine]!.capabilities.steer && entry.view.state === "running" && this.identities.has(entry.tokenHash) && Boolean(entry.controls?.steer), resumeReady: entry.view.state === "completed" && entry.view.permissionMode !== "yolo" && !entry.cleanupFailed && Boolean(entry.nativeSessionId && entry.view.runtimeProcess?.exitedAt) && Boolean(this.options.adapters[entry.view.engine]!.capabilities.resume) && !this.sessionLeases.has(entry.nativeSessionId!) };
   }
 
   async steer(callerId: string | null, id: string, text: string): Promise<void> {

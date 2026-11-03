@@ -39,6 +39,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
  if(q.method==='thread/start') {
    require('node:assert/strict').equal(q.params.sandbox,mode==='yolo'?'workspace-write':'read-only');
    require('node:assert/strict').equal(q.params.approvalPolicy,'never');
+   require('node:assert/strict').equal(q.params.ephemeral,false,'threads persist so they can be continued');
    require('node:assert/strict').equal(q.params.config['features.hooks'],false);
    if(mode==='yolo') require('node:assert/strict').ok(!q.params.developerInstructions.includes('Do not modify files'));
    require('node:assert/strict').equal(q.params.config.model_reasoning_effort,mode==='thinking'?'high':mode==='unsupported-thinking'?'invented':'medium');
@@ -155,5 +156,36 @@ readline.createInterface({input:process.stdin}).on('line', (line) => {
     assert.deepEqual(usages, [{ inputTokens: 4200, cachedInputTokens: 3000, outputTokens: 150, reasoningTokens: 60 }], "only this thread's cumulative usage is reported");
     assert.deepEqual(sessions, ["native-fixture-session"]);
     assert.ok(observations.at(-1)?.exitedAt);
+  } finally { clearTimeout(watchdog); await rm(cwd, { recursive: true, force: true }); }
+});
+
+test("Codex continues a persisted thread with thread/resume, the same isolation and a fresh bridge credential", { skip: process.platform === "win32" }, async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-orchestrator-codex-resume-"));
+  const executable = join(cwd, "fixture.cjs");
+  await writeFile(executable, `#!/usr/bin/env node
+const assert=require('node:assert/strict'); const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+ const q=JSON.parse(line);
+ if(q.method==='initialize') send({id:q.id,result:{}});
+ if(q.method==='config/read') send({id:q.id,result:{config:{mcp_servers:{'user-shell':{command:'sh'}}}}});
+ if(q.method==='thread/start') throw new Error('a continuation must not start a new thread');
+ if(q.method==='thread/resume') {
+   assert.equal(q.params.threadId,'persisted-thread'); assert.equal(q.params.excludeTurns,true);
+   assert.equal(q.params.sandbox,'read-only'); assert.equal(q.params.config['mcp_servers.user-shell.enabled'],false);
+   assert.equal(q.params.config['mcp_servers.pi_orchestrator.http_headers'].Authorization,'Bearer fresh-token');
+   send({id:q.id,result:{model:'m',thread:{id:'persisted-thread'}}});
+ }
+ if(q.method==='mcpServerStatus/list') send({id:q.id,result:{data:[{name:'user-shell',runtimeStatus:'disabled'}]}});
+ if(q.method==='turn/start') { assert.equal(q.params.threadId,'persisted-thread'); send({id:q.id,result:{turn:{id:'t2'}}}); send({method:'turn/completed',params:{threadId:'persisted-thread',turn:{id:'t2',status:'completed',items:[{type:'agentMessage',text:'continued'}]}}}); }
+});
+`, { mode: 0o700 });
+  const task: TaskView = { id: "task", title: "follow-up", attemptId: "attempt-2", parentId: null, engine: "codex", depth: 1, state: "running", cwd, createdAt: new Date().toISOString() };
+  const sessions: string[] = [];
+  const controller = new AbortController();
+  const watchdog = setTimeout(() => controller.abort(new Error("Fixture resume deadline")), 10_000);
+  try {
+    const result = await new CodexAdapter(executable).run({ task, prompt: "now explain", resumeSessionId: "persisted-thread", signal: controller.signal,
+      mcp: { url: "http://127.0.0.1:12345/mcp", token: "fresh-token" }, session: (id) => { sessions.push(id); }, activity() {} });
+    assert.equal(result, "continued"); assert.deepEqual(sessions, ["persisted-thread"]);
   } finally { clearTimeout(watchdog); await rm(cwd, { recursive: true, force: true }); }
 });

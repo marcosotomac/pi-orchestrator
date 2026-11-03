@@ -153,3 +153,24 @@ test("a transient failure of a read-only task is retried once, with usage summed
     assert.equal(parent.state, "failed"); assert.equal(attempts.parent, 1, "children would be duplicated: no retry");
   } finally { await core.close(); }
 });
+
+test("a continuation counts only its own share of a resumed thread's cumulative usage", async () => {
+  const run = async (ctx: RuntimeContext) => {
+    ctx.session("thread-1");
+    ctx.process?.({ pid: 1, exitedAt: new Date().toISOString() });
+    // Codex reports thread-wide totals: the second turn includes the first.
+    ctx.usage?.(ctx.resumeSessionId ? { inputTokens: 160, cachedInputTokens: 95, outputTokens: 14 } : { inputTokens: 100, cachedInputTokens: 40, outputTokens: 10 });
+    return ctx.resumeSessionId ? "continued" : "first";
+  };
+  const core = new Orchestrator({ cwd: process.cwd(), adapters: { codex: { capabilities: { ...capabilities, resume: true }, run } } });
+  core.attachEndpoint("http://127.0.0.1:1/mcp");
+  try {
+    const first = await core.wait(null, core.delegate(null, "codex", "read", "r").id);
+    assert.equal(core.controls(null, first.id).resumeReady, true);
+    const next = await core.wait(null, core.resume(null, first.id, "follow up", "f").id);
+    assert.equal(next.result, "continued");
+    assert.deepEqual(next.usage, { inputTokens: 60, cachedInputTokens: 55, outputTokens: 4 });
+    const yolo = await core.wait(null, core.delegate(null, "codex", "w", "w", undefined, undefined, "yolo").id);
+    assert.equal(core.controls(null, yolo.id).resumeReady, false, "YOLO sessions are never offered as continuable");
+  } finally { await core.close(); }
+});
