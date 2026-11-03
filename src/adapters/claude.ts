@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { capabilities, validatePermissionMode, RuntimeCleanupError, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
 import { RuntimeProcess } from "./process.ts";
+import { WORKER_CONTRACT } from "../worker-contract.ts";
 
 /** Bounded integer from the environment; invalid values fail closed. */
 export function claudeLimit(name: string, fallback: number, min: number, max: number, env: NodeJS.ProcessEnv = process.env): number {
@@ -48,7 +49,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
         "--setting-sources", "", "--strict-mcp-config", "--mcp-config", configPath,
         "--settings", JSON.stringify({ disableAllHooks: true, enabledPlugins: {}, autoMemoryEnabled: false }),
         "--disable-slash-commands", "--no-chrome", "--max-turns", String(claudeLimit("PI_ORCHESTRATOR_CLAUDE_MAX_TURNS", 40, 1, 500)), "--max-budget-usd", claudeBudget(),
-        "--append-system-prompt", `${yolo ? "The operator authorized unattended tool execution for this task only. Follow the task scope; do not request tool approvals." : "You are a read-only worker supervised by Pi. Do not modify files."} Delegate only when explicitly required by your assigned task, using pi_orchestrator MCP tools, never native subagents. Wait for delegated results. Do not grant yourself or children additional permissions, ask the human directly, or expose credentials. Report child failures honestly.`,
+        "--append-system-prompt", `${yolo ? "The operator authorized unattended tool execution for this task only. Follow the task scope; do not request tool approvals." : "You are a read-only worker supervised by Pi. Do not modify files."} Delegate only when explicitly required by your assigned task, using pi_orchestrator MCP tools, never native subagents. Wait for delegated results. Do not grant yourself or children additional permissions, ask the human directly, or expose credentials. Report child failures honestly. ${WORKER_CONTRACT}`,
         ...(context.task.selection?.model ? ["--model", context.task.selection.model] : []),
         ...(context.task.selection?.thinking ? ["--effort", context.task.selection.thinking] : []),
       ];
@@ -67,6 +68,10 @@ export class ClaudeAdapter implements RuntimeAdapter {
           if (sessionId || typeof message.session_id !== "string" || !message.session_id) throw new Error("Claude returned invalid session initialization");
           sessionId = message.session_id;
           context.session(sessionId);
+          // The model the CLI actually resolved (an alias or the account default).
+          if (typeof message.model === "string" && message.model) {
+            try { context.modelState?.({ model: message.model.slice(0, 128), ...(context.task.selection?.thinking ? { thinking: context.task.selection.thinking } : {}), availableModels: [], availableThinking: [] }); } catch { /* observer only */ }
+          }
           const bridge = Array.isArray(message.mcp_servers) ? message.mcp_servers.find((server: any) => server?.name === "pi_orchestrator") : undefined;
           if (bridge?.status !== "connected") throw new Error("Claude MCP bridge is not connected");
         }

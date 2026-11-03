@@ -45,7 +45,7 @@ test("the host and Codex/Claude workers may wait long; Antigravity callers keep 
   } finally { await core.close(); }
 });
 
-test("orchestrator_wait settles several tasks in one call, and settled notices do not repeat tool results to the model", async () => {
+test("orchestrator_wait settles several tasks in one call; a blocking host sends no per-task notices", async () => {
   let service: Service | undefined;
   const tools = new Map<string, any>();
   const sent: { content: unknown; details: any }[] = [];
@@ -59,20 +59,60 @@ test("orchestrator_wait settles several tasks in one call, and settled notices d
   })(fake);
   const ctx = { cwd: process.cwd(), mode: "json", ui: {} } as unknown as ExtensionCommandContext;
   try {
-    const a = (await tools.get("orchestrator_delegate").execute("a", { engine: "codex", prompt: "alpha" }, undefined, undefined, ctx)).details as TaskView;
+    const delegated = await tools.get("orchestrator_delegate").execute("a", { engine: "codex", prompt: "alpha" }, undefined, undefined, ctx);
+    assert.match(JSON.parse(delegated.content[0].text).next, /orchestrator_wait/, "a print/JSON run must wait: nothing would wake it");
+    const a = delegated.details as TaskView;
     const b = (await tools.get("orchestrator_delegate").execute("b", { engine: "claude", prompt: "beta" }, undefined, undefined, ctx)).details as TaskView;
     const both = (await tools.get("orchestrator_wait").execute("w", { taskIds: [a.id, b.id] }, undefined, undefined, ctx)).details as TaskView[];
     assert.deepEqual(both.map((task) => [task.state, task.result]), [["completed", "answer for alpha"], ["completed", "answer for beta"]]);
     const single = (await tools.get("orchestrator_wait").execute("w1", { taskId: a.id }, undefined, undefined, ctx)).details as TaskView;
     assert.equal(single.id, a.id, "a single taskId keeps returning one task, not an array");
     await assert.rejects(tools.get("orchestrator_wait").execute("w0", {}, undefined, undefined, ctx), /taskId or taskIds/);
-    const notices = sent.filter((message) => message.details?.type === "root-result");
-    assert.equal(notices.length, 2);
-    for (const notice of notices) {
-      assert.equal(typeof notice.content, "string");
-      assert.ok(!String(notice.content).includes("answer for"), "the model already gets the result from orchestrator_wait");
-      assert.match(String(notice.content), /no se repite/);
-      assert.match(notice.details.task.result, /answer for/, "the human-facing card still carries the full result");
-    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    // Measured before this change: each notice cost the model a turn of "already included".
+    assert.equal(sent.filter((message) => message.details?.type === "root-result" || message.details?.batch).length, 0);
+  } finally { await service?.close(); }
+});
+
+test("a long-lived host wakes the model once per batch with the undelivered results; waited results are not repeated", async () => {
+  let service: Service | undefined;
+  const tools = new Map<string, any>();
+  const sent: { message: any; options: any }[] = [];
+  const gates = new Map<string, () => void>();
+  const fake = { registerMessageRenderer() {}, on() {}, appendEntry() {}, sendUserMessage() {}, registerCommand() {},
+    sendMessage(message: any, options: any) { sent.push({ message, options }); },
+    registerTool(tool: any) { tools.set(tool.name, tool); },
+  } as unknown as ExtensionAPI;
+  createOrchestratorExtension(async (options) => {
+    service = await createService(options, { codex: { capabilities, run: async (ctx) => { await new Promise<void>((resolve) => gates.set(ctx.prompt, resolve)); return `answer for ${ctx.prompt}`; } } });
+    return service;
+  })(fake);
+  const ctx = { cwd: process.cwd(), mode: "rpc", ui: {} } as unknown as ExtensionCommandContext;
+  const settle = async () => { await new Promise((resolve) => setTimeout(resolve, 400)); };
+  try {
+    const first = await tools.get("orchestrator_delegate").execute("a", { engine: "codex", prompt: "alpha" }, undefined, undefined, ctx);
+    assert.match(JSON.parse(first.content[0].text).next, /termina tu turno/);
+    const a = first.details as TaskView;
+    const b = (await tools.get("orchestrator_delegate").execute("b", { engine: "codex", prompt: "beta" }, undefined, undefined, ctx)).details as TaskView;
+    while (gates.size < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+    gates.get("alpha")!(); await service!.core.wait(null, a.id); await settle();
+    assert.equal(sent.length, 0, "no wake-up while the batch still has live work");
+    gates.get("beta")!(); await service!.core.wait(null, b.id); await settle();
+    assert.equal(sent.length, 1, "exactly one message for the whole batch");
+    assert.deepEqual(sent[0]!.options, { triggerTurn: true, deliverAs: "followUp" });
+    assert.match(sent[0]!.message.content, /answer for alpha/); assert.match(sent[0]!.message.content, /answer for beta/);
+    assert.deepEqual(sent[0]!.message.details.batch.map((task: TaskView) => task.id), [a.id, b.id]);
+    const again = JSON.parse((await tools.get("orchestrator_wait").execute("w", { taskIds: [a.id, b.id] }, undefined, undefined, ctx)).content[0].text);
+    assert.ok(again.every((task: any) => /ya entregado/.test(task.result)), "the batch message counts as delivery");
+
+    // A result the model is already blocking on is delivered by that wait, not by a wake-up.
+    const c = (await tools.get("orchestrator_delegate").execute("c", { engine: "codex", prompt: "gamma" }, undefined, undefined, ctx)).details as TaskView;
+    while (!gates.has("gamma")) await new Promise((resolve) => setTimeout(resolve, 5));
+    const waited = tools.get("orchestrator_wait").execute("wc", { taskId: c.id }, undefined, undefined, ctx);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    gates.get("gamma")!();
+    assert.equal(JSON.parse((await waited).content[0].text).result, "answer for gamma");
+    await settle();
+    assert.equal(sent.length, 1, "no second message for a waited task");
   } finally { await service?.close(); }
 });

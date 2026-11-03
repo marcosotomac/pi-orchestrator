@@ -61,6 +61,8 @@ export interface OrchestratorOptions {
   maxQueued?: number;
   reservedChildSlots?: number;
   maxRuntimeMs?: number;
+  /** Per-engine model/thinking used when neither the environment nor the request sets one. */
+  defaultSelection?: Partial<Record<Engine, ModelSelection>>;
 }
 
 /** One in-memory execution attempt per task; optional durable checkpoints do not grant recovery authority. */
@@ -169,7 +171,8 @@ export class Orchestrator {
     const permissionMode = validatePermissionMode(requestedPermissionMode);
     if (callerId !== null && permissionMode === "yolo") throw new Error("Only the operator may authorize YOLO; nested tasks cannot escalate permissions");
     const prefix = `PI_ORCHESTRATOR_${engine.toUpperCase()}`;
-    const selection = validateSelection({ ...(process.env[`${prefix}_MODEL`] ? { model: process.env[`${prefix}_MODEL`] } : {}), ...(process.env[`${prefix}_THINKING`] ? { thinking: process.env[`${prefix}_THINKING`] } : {}), ...requestedSelection });
+    // Product default < environment < explicit request.
+    const selection = validateSelection({ ...this.options.defaultSelection?.[engine], ...(process.env[`${prefix}_MODEL`] ? { model: process.env[`${prefix}_MODEL`] } : {}), ...(process.env[`${prefix}_THINKING`] ? { thinking: process.env[`${prefix}_THINKING`] } : {}), ...requestedSelection });
     if (engine === "claude" && selection.thinking && !["low", "medium", "high", "xhigh", "max"].includes(selection.thinking)) throw new Error("Unsupported Claude effort; expected low, medium, high, xhigh or max");
     if (recoverySource && (callerId !== null || Object.values(recoverySource).length !== 3 ||
         ![recoverySource.runId, recoverySource.taskId, recoverySource.attemptId].every((id) => typeof id === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(id)))) throw new Error("Invalid recovery source");

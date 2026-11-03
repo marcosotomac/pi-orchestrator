@@ -21,7 +21,8 @@
     "test:installer": "python3 test/antigravity_installer_test.py",
     "smoke:antigravity": "tsx scripts/live-antigravity.ts",
     "smoke:antigravity-nested": "tsx scripts/live-antigravity-nested.ts",
-    "test:tui": "python3 test/tui_harness_test.py && python3 scripts/tui-smoke.py"
+    "test:tui": "python3 test/tui_harness_test.py && python3 scripts/tui-smoke.py",
+    "bench:live": "tsx scripts/bench-live.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",

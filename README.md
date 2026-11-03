@@ -165,7 +165,7 @@ En el panel:
 
 Para delegar desde el modelo principal de Pi están disponibles:
 
-- `orchestrator_delegate`: inicia una tarea; devuelve identificador, no resultado.
+- `orchestrator_delegate`: inicia una tarea; devuelve identificador y un campo `next` que dice al modelo si debe terminar su turno o esperar. En la TUI y en RPC el modelo **no se bloquea**: cuando terminan todas las tareas que delegó, sus resultados llegan en **un único mensaje** que inicia su siguiente turno. En `print`/`json`, donde nada despertaría al modelo, sigue esperando con `orchestrator_wait`.
 - `orchestrator_status`: lista tareas (sin el texto de los resultados) o consulta una concreta con su resultado completo.
 - `orchestrator_wait`: espera una o varias tareas (`taskIds`), 5 min por defecto y 10 como máximo; repetir si siguen en ejecución. Cada resultado se envía al modelo **una sola vez**; las consultas posteriores devuelven una referencia.
 - `orchestrator_cancel`: cancela el árbol y espera la limpieza de los runtimes.
@@ -273,6 +273,23 @@ PI_ORCHESTRATOR_CODEX_MODEL=<id> PI_ORCHESTRATOR_CLAUDE_MODEL=<id> npm run smoke
 ```
 
 Sin variables se conservan los modelos predeterminados de cada runtime. Codex recibe esfuerzo de razonamiento `low`. Claude tiene un máximo de 12 turnos y la opción de presupuesto API de USD 1; **esa opción no es un límite garantizado de consumo para suscripciones OAuth**. No hay un límite monetario duro para Codex. El límite general es el plazo de ejecución.
+
+## Rendimiento medido
+
+`npm run bench:live -- ETIQUETA fanout|trivial [N]` (con `BENCH_MODE=rpc|json`) ejecuta el modelo principal real de Pi y los motores reales sobre un repo con tres errores plantados; consume cuota. Resultados del 2026-11-03 con `gpt-6.1-sol` como modelo principal (tres tareas en paralelo: 2 Claude y 1 Codex):
+
+| Métrica | Antes (2 ejecuciones) | Después, TUI/RPC (3) | Después, JSON bloqueante (1) |
+| --- | --- | --- | --- |
+| Chat bloqueado | 39–103 s | 12–14 s | 31 s |
+| Vueltas del modelo principal | 7 (1–2 sin aporte) | 3–5 (0 sin aporte) | 5 (0) |
+| Tokens de entrada del modelo principal | 26 000–26 800 | 10 900–17 400 | 16 700 |
+| Coste de las tareas Claude | $0.067–0.086 (Opus por defecto) | $0.028–0.048 (Sonnet) | $0.028 |
+| Aciertos / evidencia `archivo:línea` | 3/3 · 3/3 | 3/3 · 3/3 | 3/3 · 3/3 |
+
+- Sin `--model`, Claude usa el modelo predeterminado de la cuenta (medido: `claude-opus-5-5`). La extensión usa `sonnet` salvo que lo pida la tarea o `PI_ORCHESTRATOR_CLAUDE_MODEL`. El modelo resuelto se registra por tarea.
+- El formato de respuesta de los motores (`src/worker-contract.ts`) se midió aislado (A/B, 6 tareas por motor): aciertos 6/6 en ambos, resultados un 12 % (Claude) y un 25 % (Codex) más cortos y tokens totales iguales. No se aplica a Antigravity: añadido a su prompt, las tareas anidadas restringidas fallaron (0/4 frente a 6/6).
+- Antigravity 1.4.5 en paralelo: 18/18 tras el arreglo de notificaciones previas a la sesión. Antigravity→Claude: 6/6 tras denegar sin abortar (antes fallaban ~2 de 13).
+- Coste fijo de una delegación trivial: unos 14 000 tokens con Claude y 36 000 con Codex. Por eso la herramienta indica no delegar lo que el modelo principal resuelve en uno o dos pasos (medido: en ese caso el modelo principal ya lo resuelve sin delegar).
 
 ## Arquitectura
 
@@ -407,7 +424,7 @@ Cobertura local: políticas, propagación desde el tool, fixtures de los tres mo
 - `/orch capabilities TASK`: capacidad del adaptador y disponibilidad actual; no inicia un servicio ni adopta archivos históricos.
 - `/orch steer TASK TEXTO`: solo Codex y su turno vivo. Correlaciona hilo/turno esperado; un ACK no demuestra obediencia. `artifacts/native-steer-mqHjxW/report.json` sí verifica que el resultado contiene una marca enviada exclusivamente por steer.
 - `/orch resume TASK TEXTO`: solo Antigravity, desde una tarea completada con limpieza confirmada en **el coordinador todavía vivo**. Crea tarea/intento/proceso/credencial nuevos y conserva la sesión nativa; exclusión por sesión evita continuaciones simultáneas. No importa archivos, no adopta PIDs y no reenvía transcripts. La sesión puede contener continuaciones anteriores; no es un fork del estado histórico del origen. `artifacts/native-resume-bRLi0Z/report.json` verifica recuerdo de una marca ausente del segundo prompt, misma sesión e intentos distintos.
-- En modo restringido, Antigravity traslada solicitudes adicionales a confirmación/selección humana en Pi. Permisos adicionales solo ofrecen `allow_once`, nunca aprobación persistente. Sin TUI, al expirar/cancelar/completar o sin handler, se deniega. Texto externo no confiable y detalles redactados; las respuestas tardías pierden autoridad. Codex/Claude no ganan permisos interactivos.
+- En modo restringido, Antigravity traslada solicitudes adicionales a confirmación/selección humana en Pi. Permisos adicionales solo ofrecen `allow_once`, nunca aprobación persistente. Sin TUI, al expirar o sin handler, la operación se deniega (`cancelled`) y el turno continúa sin ella, como en Codex y Claude; el resultado lleva un aviso con el número de denegaciones. Más de 8 denegaciones, una petición de otra sesión o fuera del turno vivo siguen haciendo fallar la tarea. Texto externo no confiable y detalles redactados; las respuestas tardías pierden autoridad. Codex/Claude no ganan permisos interactivos.
 - `PI_ORCHESTRATOR_QUEUE=fair` es el valor por defecto de la extensión: cola limitada de raíces, FIFO por motor y round-robin entre motores (no equidad multiusuario). `reject` restaura el rechazo inmediato. `PI_ORCHESTRATOR_MAX_QUEUED` y `PI_ORCHESTRATOR_RESERVED_CHILD_SLOTS` ajustan límites; los hijos rechazan saturación en vez de esperar detrás de sus ancestros.
 - `PI_ORCHESTRATOR_MAX_RUNTIME_MS` limita la suma monotónica de milisegundos ocupados por slots de runtime, incluidos padres esperando. Al agotarse cierra admisión y cancela activos/pendientes; el cleanup puede exceder el límite. No mide CPU, tokens ni facturación. `/orch usage` informa consumo y coste monetario no disponible.
 - También se validan `PI_ORCHESTRATOR_MAX_CONCURRENT`, `MAX_TASKS`, `MAX_DEPTH` e `INTERACTION_TIMEOUT_MS` con el mismo prefijo completo.

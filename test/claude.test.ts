@@ -48,7 +48,7 @@ fs.writeFileSync(${JSON.stringify(marker)},configPath,{mode:0o600});
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const input=JSON.parse(line);
  assert.equal(input.type,'user');assert.equal(input.message.content,'fixture prompt');
- const init={type:'system',subtype:'init',session_id:'fixture-session',mcp_servers:[{name:'pi_orchestrator',status:'connected'}]};
+ const init={type:'system',subtype:'init',session_id:'fixture-session',model:'claude-fixture-model',mcp_servers:[{name:'pi_orchestrator',status:'connected'}]};
  const result={type:'result',subtype:'success',is_error:false,session_id:'fixture-session',result:'fixture result'};
  if(mode==='missing-bridge') init.mcp_servers=[];
  if(mode==='disconnected-bridge') init.mcp_servers[0].status='failed';
@@ -80,6 +80,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
     const sessions: string[] = [];
     const usages: unknown[] = [];
     const partials: string[] = [];
+    const models: unknown[] = [];
     const controller = new AbortController();
     const watchdog = setTimeout(() => controller.abort(new Error("Fixture protocol deadline")), 15_000);
     const task: TaskView = { id: "task", title: "fixture", attemptId: "attempt", parentId: null, engine: "claude", depth: 1, state: "running", cwd, createdAt: new Date().toISOString() };
@@ -88,7 +89,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
       if (mode === "thinking") task.selection = { model: "sonnet", thinking: "high" };
       const running = new ClaudeAdapter(executable).run({ task, prompt: "fixture prompt", signal: controller.signal,
         mcp: { url: "http://127.0.0.1:12345/mcp", token: "fixture-private-token" },
-        session: (id) => { sessions.push(id); }, activity() {}, usage: (value) => { usages.push(value); }, partial: (text) => { partials.push(text); }, process: (info) => {
+        session: (id) => { sessions.push(id); }, activity() {}, usage: (value) => { usages.push(value); }, partial: (text) => { partials.push(text); }, modelState: (state) => { models.push(state.model); }, process: (info) => {
           observations.push(info);
           if (mode === "early-abort" && !info.exitedAt) controller.abort(new Error("early fixture abort"));
           if (mode === "throwing-observer") throw new Error("fixture observer failure");
@@ -103,6 +104,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
         if (mode === "denied-tool") assert.match(text, /^fixture result\n\n\[Aviso del orquestador: Claude intentó herramientas no autorizadas \(Write\)/);
         else assert.equal(text, "fixture result");
         assert.deepEqual(sessions, ["fixture-session"]);
+        assert.deepEqual(models, ["claude-fixture-model"], "the model the CLI resolved is recorded");
         // Cache reads/creations count as input; cost is the CLI's own estimate.
         if (mode === "success") assert.deepEqual(usages, [{ inputTokens: 3620, cachedInputTokens: 3000, outputTokens: 80, costUsd: 0.0421 }]);
       }

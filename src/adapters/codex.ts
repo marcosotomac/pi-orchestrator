@@ -1,5 +1,6 @@
 import { capabilities, validatePermissionMode, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
 import { RuntimeProcess } from "./process.ts";
+import { WORKER_CONTRACT } from "../worker-contract.ts";
 
 interface McpServerRow { name: string; runtimeStatus?: string | null }
 
@@ -168,7 +169,7 @@ export class CodexAdapter implements RuntimeAdapter {
         approvalPolicy: "never",
         ephemeral: true,
         ...(context.task.selection?.model ? { model: context.task.selection.model } : {}),
-        developerInstructions: `${yolo ? "The operator authorized unattended tool execution for this task only. Follow the task scope; do not request tool approvals." : "You are a read-only worker controlled by Pi. Do not modify files."} Use only the pi_orchestrator MCP tools for delegation. Delegate only if your task explicitly asks. Do not use native subagents, grant yourself or children additional permissions, ask the human directly, or expose credentials. A running child is not a result: wait until it settles. Report failed/cancelled children honestly.`,
+        developerInstructions: `${yolo ? "The operator authorized unattended tool execution for this task only. Follow the task scope; do not request tool approvals." : "You are a read-only worker controlled by Pi. Do not modify files."} Use only the pi_orchestrator MCP tools for delegation. Delegate only if your task explicitly asks. Do not use native subagents, grant yourself or children additional permissions, ask the human directly, or expose credentials. A running child is not a result: wait until it settles. Report failed/cancelled children honestly. ${WORKER_CONTRACT}`,
         config: {
           "features.hooks": false,
           notify: [],
@@ -198,6 +199,9 @@ export class CodexAdapter implements RuntimeAdapter {
       if (typeof started?.thread?.id !== "string" || !started.thread.id) throw new Error("Codex returned no thread id");
       threadId = String(started.thread.id);
       context.session(threadId);
+      if (typeof started.model === "string" && started.model) {
+        try { context.modelState?.({ model: started.model.slice(0, 128), thinking: context.task.selection?.thinking ?? defaultEffort(), availableModels: [], availableThinking: [] }); } catch { /* observer only */ }
+      }
       // Fail closed: prove the thread really runs without inherited servers.
       const leaked = (await listMcpServers(request, threadId))
         .filter((server) => server.name !== "pi_orchestrator" && server.runtimeStatus !== "disabled")

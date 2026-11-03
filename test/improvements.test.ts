@@ -11,7 +11,7 @@ import { taskCard, taskDetail } from "../src/presentation.ts";
 import { capabilities, type RuntimeContext, type TaskView } from "../src/types.ts";
 
 test("product defaults queue a root fan-out instead of rejecting it, and env still wins", async () => {
-  assert.deepEqual(productDefaults, { queuePolicy: "fair", maxConcurrent: 4, interactionTimeoutMs: 300_000 });
+  assert.deepEqual(productDefaults, { queuePolicy: "fair", maxConcurrent: 4, interactionTimeoutMs: 300_000, defaultSelection: { claude: { model: "sonnet" } } });
   assert.equal({ ...productDefaults, ...runtimeConfiguration({ PI_ORCHESTRATOR_QUEUE: "reject" }) }.queuePolicy, "reject");
   const blocked = async (ctx: RuntimeContext) => { await delay(60_000, undefined, { signal: ctx.signal }); return "x"; };
   const core = new Orchestrator({ cwd: process.cwd(), ...productDefaults, adapters: { codex: { capabilities, run: blocked } } });
@@ -103,4 +103,23 @@ test("the model gets a compact view and each result only once; listings carry no
     const one = await call("orchestrator_status", { taskId: a.id });
     assert.equal(one.model.result, "answer for alpha", "an explicit status always returns the result");
   } finally { await service?.close(); }
+});
+
+test("per-engine defaults apply only when neither the environment nor the request chooses a model", async () => {
+  const seen: (string | undefined)[] = [];
+  const run = async (ctx: RuntimeContext) => { seen.push(ctx.task.selection?.model); return "ok"; };
+  const core = new Orchestrator({ cwd: process.cwd(), ...productDefaults, adapters: { claude: { capabilities, run }, codex: { capabilities, run } } });
+  core.attachEndpoint("http://127.0.0.1:1/mcp");
+  const previous = process.env.PI_ORCHESTRATOR_CLAUDE_MODEL;
+  try {
+    await core.wait(null, core.delegate(null, "claude", "a", "a").id);
+    await core.wait(null, core.delegate(null, "claude", "b", "b", undefined, { model: "opus" }).id);
+    process.env.PI_ORCHESTRATOR_CLAUDE_MODEL = "haiku";
+    await core.wait(null, core.delegate(null, "claude", "c", "c").id);
+    await core.wait(null, core.delegate(null, "codex", "d", "d").id);
+    assert.deepEqual(seen, ["sonnet", "opus", "haiku", undefined], "Codex keeps its own configured model");
+  } finally {
+    if (previous === undefined) delete process.env.PI_ORCHESTRATOR_CLAUDE_MODEL; else process.env.PI_ORCHESTRATOR_CLAUDE_MODEL = previous;
+    await core.close();
+  }
 });
