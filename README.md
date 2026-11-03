@@ -386,7 +386,17 @@ Las herramientas MCP son `delegate`, `status`, `wait` y `cancel`. La identidad d
 | Turnos de Claude | 40 (`PI_ORCHESTRATOR_CLAUDE_MAX_TURNS`, 1–500); presupuesto `--max-budget-usd` 1.00 por tarea (`PI_ORCHESTRATOR_CLAUDE_MAX_BUDGET_USD`, hasta 100) |
 | Notificaciones | `PI_ORCHESTRATOR_NOTIFY=desktop` (por defecto: aviso en Pi y notificación de escritorio OSC 777, compatible con Ghostty), `bell` o `off`; al terminar una tarea raíz o cuando un motor pide permiso o respuesta |
 
-**Panel (`/orch`).** Las tareas se ordenan por urgencia (te necesita › fallida › atascada › en curso › lista), sin IDs técnicos. Muestra tiempo, tokens reportados por el motor, subtareas activas y "sin actividad hace N" (tras 3 min sin actividad observada por el host). Lo que reporta el motor se etiqueta como "motor: …" y nunca se presenta como una fase verificada. Teclas, solo si la tarea las admite: `s` redirigir (Codex en curso), `r` reanudar (Antigravity), `R` reintentar (tarea raíz terminada; YOLO vuelve a pedir confirmación), `e` editor, `i` insertar en el chat, `y` copiar, `c` cancelar árbol, `d` detalles, `f` filtro. El widget se reduce a una línea cuando no queda trabajo activo. Los permisos se muestran con el comando y las rutas destacados, no como JSON.
+**Panel (`/orch`).**
+
+- **Un solo sitio a la vez:**
+  - Con el panel abierto, el widget no se dibuja.
+  - Ya no hay barra de estado que repita el resumen.
+  - El widget solo lista el trabajo activo y lo que te necesita; lo terminado es un contador ("terminadas: 2 listas · 1 cancelada").
+- **Títulos cortos:** el modelo pasa un `title` de 2 a 6 palabras (medido en vivo: "Detectar NaN con vacío", "Revisar secretos en logs"). Si no lo pasa, se usa la primera frase del encargo con las rutas reducidas a su último nombre. El encargo completo se ve con `d`.
+- **Orden:** primero lo activo y debajo lo terminado, atenuado (lo fallido en rojo). Una tarea cancelada o fallida que luego se repitió, aunque fuera con otras palabras, se marca como "sustituida". Las filas se limitan a 120 columnas para que el estado quede junto a su título en terminales anchas.
+- **Lenguaje llano:** "Antigravity · Gemini 3.8 Flash · razonamiento alto · YOLO (solo esta tarea)"; el origen exacto del modelo y del nivel está en `d`. También "Aún sin respuesta." y "c cancelar", que avisa si hay subtareas.
+- **Actividad real:** los tres motores informan la herramienta y su objetivo ("leyendo AGENTS.md", "ejecutando `ls -la`", "editando a.ts"). El panel muestra los últimos 3 pasos con su antigüedad.
+- **Teclas en una sola línea abajo,** solo las que funcionan para la tarea seleccionada. Si no caben, se acortan o se quitan las menos importantes; `Esc cerrar` siempre queda.
 
 Con la cola justa por defecto, las raíces que exceden la capacidad esperan; las subtareas siguen rechazándose si no queda plaza (no pueden esperar detrás de sus ancestros). Un padre que necesite capacidad para hijos debe conservar una plaza disponible. La cadena de tres runtimes `Pi → Codex → Claude → Antigravity` requiere aumentar la profundidad predeterminada; esa cadena de tres runtimes no se ha probado.
 

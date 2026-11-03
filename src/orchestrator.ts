@@ -175,11 +175,11 @@ export class Orchestrator {
   }
 
   private snapshot(view: TaskView): TaskView {
-    return { ...view, ...(view.selection ? { selection: { ...view.selection } } : {}), ...(view.modelState ? { modelState: structuredClone(view.modelState) } : {}), ...(view.diagnostic ? { diagnostic: { ...view.diagnostic } } : {}), ...(view.continuationSource ? { continuationSource: { ...view.continuationSource } } : {}), ...(view.recoverySource ? { recoverySource: { ...view.recoverySource } } : {}), ...(view.runtimeProcess ? { runtimeProcess: { ...view.runtimeProcess } } : {}), ...(view.usage ? { usage: { ...view.usage } } : {}), ...(view.changes ? { changes: { ...view.changes } } : {}), ...(view.context ? { context: { ...view.context } } : {}) };
+    return { ...view, ...(view.selection ? { selection: { ...view.selection } } : {}), ...(view.modelState ? { modelState: structuredClone(view.modelState) } : {}), ...(view.diagnostic ? { diagnostic: { ...view.diagnostic } } : {}), ...(view.continuationSource ? { continuationSource: { ...view.continuationSource } } : {}), ...(view.recoverySource ? { recoverySource: { ...view.recoverySource } } : {}), ...(view.runtimeProcess ? { runtimeProcess: { ...view.runtimeProcess } } : {}), ...(view.usage ? { usage: { ...view.usage } } : {}), ...(view.changes ? { changes: { ...view.changes } } : {}), ...(view.context ? { context: { ...view.context } } : {}), ...(view.recentActivity ? { recentActivity: view.recentActivity.map((step) => ({ ...step })) } : {}) };
   }
 
-  delegate(callerId: string | null, engine: Engine, prompt: string, requestKey: string, recoverySource?: RecoverySource, selection?: ModelSelection, permissionMode?: PermissionMode, cwd?: string, web?: boolean): TaskView {
-    return this.admit(callerId, engine, prompt, requestKey, recoverySource, undefined, undefined, selection, permissionMode, cwd, web);
+  delegate(callerId: string | null, engine: Engine, prompt: string, requestKey: string, recoverySource?: RecoverySource, selection?: ModelSelection, permissionMode?: PermissionMode, cwd?: string, web?: boolean, label?: string): TaskView {
+    return this.admit(callerId, engine, prompt, requestKey, recoverySource, undefined, undefined, selection, permissionMode, cwd, web, label);
   }
 
   /** An operator-chosen directory: real, a directory, and inside cwd or an allowed root. */
@@ -208,7 +208,7 @@ export class Orchestrator {
     return continuation;
   }
 
-  private admit(callerId: string | null, engine: Engine, prompt: string, requestKey: string, recoverySource?: RecoverySource, resumeSessionId?: string, continuationSource?: { taskId: string; attemptId: string }, requestedSelection?: ModelSelection, requestedPermissionMode?: PermissionMode, requestedCwd?: string, web?: boolean): TaskView {
+  private admit(callerId: string | null, engine: Engine, prompt: string, requestKey: string, recoverySource?: RecoverySource, resumeSessionId?: string, continuationSource?: { taskId: string; attemptId: string }, requestedSelection?: ModelSelection, requestedPermissionMode?: PermissionMode, requestedCwd?: string, web?: boolean, requestedLabel?: string): TaskView {
     const permissionMode = validatePermissionMode(requestedPermissionMode);
     if (callerId !== null && permissionMode === "yolo") throw new Error("Only the operator may authorize YOLO; nested tasks cannot escalate permissions");
     const prefix = `PI_ORCHESTRATOR_${engine.toUpperCase()}`;
@@ -233,6 +233,8 @@ export class Orchestrator {
     if (parent && requestedCwd !== undefined) throw new Error("Nested tasks run in their parent's directory");
     if (web !== undefined && typeof web !== "boolean") throw new Error("Invalid web flag");
     if (parent && web) throw new Error("Only the operator may grant internet access; nested tasks cannot request it");
+    // Cosmetic and untrusted: one bounded line, never part of the request identity.
+    const label = typeof requestedLabel === "string" ? requestedLabel.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60) || undefined : undefined;
     const cwd = parent ? parent.effectiveCwd ?? parent.view.cwd : this.placement(requestedCwd);
     const key = JSON.stringify([callerId, requestKey]);
     const signature = this.hash(JSON.stringify([engine, prompt, recoverySource, resumeSessionId, continuationSource, selection, permissionMode, cwd, Boolean(web)]));
@@ -253,7 +255,7 @@ export class Orchestrator {
     if (queued && this.queue.size >= this.maxQueued) throw new Error("Root queue limit reached");
     const token = randomBytes(32).toString("base64url");
     const view: TaskView = {
-      id: randomUUID(), title: prompt.trim().replace(/\s+/g, " ").slice(0, 160), attemptId: randomUUID(), parentId: callerId, engine, depth, selection, permissionMode, ...(web ? { web: true } : {}),
+      id: randomUUID(), title: prompt.trim().replace(/\s+/g, " ").slice(0, 160), attemptId: randomUUID(), parentId: callerId, engine, depth, selection, permissionMode, ...(web ? { web: true } : {}), ...(label ? { label } : {}),
       cwd, state: queued ? "queued" : "running", createdAt: new Date().toISOString(),
       ...(recoverySource ? { recoverySource: { ...recoverySource } } : {}),
       ...(resumeSessionId ? { continuation: "native-resume" as const, continuationSource: { ...continuationSource! } } : {}),
@@ -400,6 +402,8 @@ export class Orchestrator {
           if (entry.controller.signal.aborted || isTerminal(entry.view)) return;
           entry.view.lastActivity = this.redact(detail, token).slice(0, 120);
           entry.view.activityAt = new Date().toISOString();
+          const recent = entry.view.recentActivity ?? [];
+          if (recent.at(-1)?.text !== entry.view.lastActivity) entry.view.recentActivity = [...recent, { at: entry.view.activityAt, text: entry.view.lastActivity }].slice(-3);
           // A durable rewrite (two fsyncs) per tool call is pure I/O (measured: 378
           // activity events in one session). Persist at most every 5 s per task;
           // the first one and the settle checkpoint are always written.
@@ -500,7 +504,7 @@ export class Orchestrator {
     const source = this.entry(sourceId);
     if (source.view.parentId !== null) throw new Error("Only root tasks can be retried; retry their parent instead");
     if (!isTerminal(source.view)) throw new Error("Task is still active; cancel it before retrying");
-    return this.admit(null, source.view.engine, source.prompt, requestKey, undefined, undefined, undefined, source.view.selection, source.view.permissionMode, source.view.cwd === this.cwd ? undefined : source.view.cwd);
+    return this.admit(null, source.view.engine, source.prompt, requestKey, undefined, undefined, undefined, source.view.selection, source.view.permissionMode, source.view.cwd === this.cwd ? undefined : source.view.cwd, source.view.web, source.view.label);
   }
 
   private resultDirectory?: string;
@@ -511,6 +515,12 @@ export class Orchestrator {
       writeFileSync(path, text, { mode: 0o600 });
       return path;
     } catch { return undefined; }
+  }
+
+  /** Operator only: the full prompt, kept in memory (never journaled), for the detail view. */
+  promptOf(callerId: string | null, id: string): string | undefined {
+    if (callerId !== null) return undefined;
+    return this.entries.get(id)?.prompt;
   }
 
   /** One automatic retry is safe only when repeating cannot duplicate side effects. */

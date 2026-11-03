@@ -87,10 +87,27 @@ export function urgentRows(tasks: TaskView[], attention: (id: string) => Attenti
   return rows;
 }
 
+/**
+ * Panel/widget order: trees with live work (most urgent first), then finished
+ * trees, newest first. `finished` marks rows of the second group.
+ */
+export function groupedRows(tasks: TaskView[], attention: (id: string) => Attention | undefined = () => undefined, now = Date.now()) {
+  const rows = urgentRows(tasks, attention, now);
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const rootOf = (task: TaskView) => { let current = task; const seen = new Set<string>(); while (current.parentId && byId.has(current.parentId) && !seen.has(current.id)) { seen.add(current.id); current = byId.get(current.parentId)!; } return current; };
+  const liveRoots = new Set(tasks.filter((task) => !isTerminal(task)).map((task) => rootOf(task).id));
+  const active = rows.filter(({ task }) => liveRoots.has(rootOf(task).id)).map((row) => ({ ...row, finished: false }));
+  const ended = (task: TaskView) => Date.parse(rootOf(task).endedAt ?? rootOf(task).createdAt);
+  const finished = rows.filter(({ task }) => !liveRoots.has(rootOf(task).id))
+    .map((row, index) => ({ ...row, index })).sort((a, b) => ended(b.task) - ended(a.task) || a.index - b.index)
+    .map(({ index: _index, ...row }) => ({ ...row, finished: true }));
+  return [...active, ...finished];
+}
+
 export function taskPhase(task: TaskView, attention?: Attention): string {
   if (task.state !== "running") return stateLabel[task.state];
   if (attention) return attention === "permission" ? "esperando tu permiso" : "esperando tu respuesta";
-  if (!task.runtimeSessionId) return "iniciando sesión";
+  if (!task.runtimeSessionId) return "arrancando";
   // A live child alone does not prove that its parent is waiting for it.
   return "trabajando";
 }
@@ -102,26 +119,32 @@ export function taskPhase(task: TaskView, attention?: Attention): string {
 export function activityLabel(raw?: string): string | undefined {
   if (!raw) return undefined;
   const text = oneLine(raw);
-  const rules: [RegExp, string][] = [
-    [/mcp\/pi_orchestrator\/delegate|mcp__pi_orchestrator__delegate/, "delegando una subtarea"],
-    [/mcp\/pi_orchestrator\/wait|mcp__pi_orchestrator__wait/, "consultando sus subtareas"],
-    [/mcp\/pi_orchestrator\/(status|cancel)|mcp__pi_orchestrator__(status|cancel)/, "gestionando sus subtareas"],
-    [/waiting for human permission/, "pidiendo tu permiso"],
-    [/waiting for user answer/, "esperando tu respuesta"],
-    [/approval denied|denied permission/, "una acción fue denegada por permisos"],
-    [/YOLO approval/, "acción aprobada (YOLO)"],
-    [/scoped bridge approval/, "usando el canal del orquestador"],
-    [/codex: commandExecution|claude: Bash/, "ejecutando un comando"],
-    [/codex: fileChange|claude: (Write|Edit|MultiEdit)/, "editando archivos"],
-    [/claude: (Grep|Glob)/, "buscando en el código"],
-    [/claude: Read/, "leyendo archivos"],
-    [/codex: reasoning/, "razonando"],
-    [/codex: agentMessage/, "redactando la respuesta"],
-    [/codex: webSearch|WebSearch|WebFetch/, "consultando la web"],
-    [/antigravity: tool activity/, "usando herramientas"],
+  const orchestrator = /^orchestrator: (.+)$/.exec(text);
+  if (orchestrator) return orchestrator[1];
+  // "engine: action · target" from the adapters; the target is already a short name.
+  const [, action = text, target] = /^(?:codex|claude|antigravity):\s*(.*?)(?: · (.+))?$/.exec(text) ?? [];
+  const on = (verb: string) => target ? `${verb} ${target}` : verb;
+  const quoted = (verb: string) => target ? `${verb} \`${target}\`` : verb;
+  const rules: [RegExp, () => string][] = [
+    [/mcp\/pi_orchestrator\/delegate|mcp__pi_orchestrator__delegate/, () => "delegando una subtarea"],
+    [/mcp\/pi_orchestrator\/wait|mcp__pi_orchestrator__wait/, () => "esperando a sus subtareas"],
+    [/mcp\/pi_orchestrator\/(status|cancel)|mcp__pi_orchestrator__(status|cancel)/, () => "gestionando sus subtareas"],
+    [/waiting for human permission/, () => "esperando tu permiso"],
+    [/waiting for user answer/, () => "esperando tu respuesta"],
+    [/approval denied|denied permission/, () => "una acción fue denegada por permisos"],
+    [/YOLO approval/, () => "acción aprobada (YOLO)"],
+    [/scoped bridge approval/, () => "hablando con el orquestador"],
+    [/^(commandExecution|Bash|execute)$/, () => quoted("ejecutando")],
+    [/^(fileChange|Write|Edit|MultiEdit|edit)$/, () => on("editando")],
+    [/^(Grep|Glob|search)$/, () => target ? `buscando ${target}` : "buscando en el código"],
+    [/^(Read|read)$/, () => target ? `leyendo ${target}` : "leyendo archivos"],
+    [/^reasoning$/, () => "pensando"],
+    [/^agentMessage$/, () => "redactando la respuesta"],
+    [/^(webSearch|WebSearch|WebFetch|fetch)$/, () => on("consultando la web")],
+    [/^(tool activity|tool|other)$/, () => target ? `usando ${target}` : "usando una herramienta"],
   ];
-  for (const [pattern, label] of rules) if (pattern.test(text)) return label;
-  const mcp = /codex: mcp\/([\w.-]+)\/([\w.-]+)/.exec(text) ?? /mcp__([\w.-]+)__([\w.-]+)/.exec(text);
+  for (const [pattern, label] of rules) if (pattern.test(action) || pattern.test(text)) return label();
+  const mcp = /mcp\/([\w.-]+)\/([\w.-]+)/.exec(text) ?? /mcp__([\w.-]+)__([\w.-]+)/.exec(text);
   if (mcp) return `herramienta ${mcp[1]}/${mcp[2]}`;
   return text.replace(/^(codex|claude|antigravity):\s*/, "").slice(0, 60) || undefined;
 }
@@ -161,19 +184,71 @@ export function formatTokens(usage?: TaskUsage): string | undefined {
   return parts.join(" · ");
 }
 
+/** "gemini-3.8-flash" → "Gemini 3.8 Flash", "gpt-6.1-sol" → "GPT-6.1 Sol", "claude-sonnet-5-5" → "Claude Sonnet 5.5". */
+export function modelName(id: string): string {
+  const claude = /^claude-([a-z]+)-(\d+)-(\d+)$/.exec(id);
+  if (claude) return `Claude ${claude[1]![0]!.toUpperCase()}${claude[1]!.slice(1)} ${claude[2]}.${claude[3]}`;
+  if (/^(haiku|sonnet|opus)$/.test(id)) return `Claude ${id[0]!.toUpperCase()}${id.slice(1)}`;
+  const gpt = /^gpt-([\d.]+)(?:-(.+))?$/.exec(id);
+  if (gpt) return `GPT-${gpt[1]}${gpt[2] ? ` ${gpt[2].split("-").map((part) => part[0]!.toUpperCase() + part.slice(1)).join(" ")}` : ""}`;
+  return id.split("-").map((part) => /^\d/.test(part) ? part : part[0]!.toUpperCase() + part.slice(1)).join(" ");
+}
+
+const thinkingNames: Record<string, string> = { minimal: "mínimo", low: "bajo", medium: "medio", high: "alto", xhigh: "muy alto", max: "máximo", ultra: "ultra" };
+export const thinkingName = (level: string) => thinkingNames[level] ?? level;
+
+/** Plain words: engine · model · reasoning · permissions. Technical provenance lives in the details. */
 export function modelLabel(task: TaskView): string {
-  const requested = task.selection;
-  const confirmed = task.modelState;
-  let fallbackThinking = "thinking predeterminado";
-  if (task.engine === "codex") {
-    try { fallbackThinking = `thinking ${defaultEffort()} (predeterminado del orquestador)`; } catch { /* invalid env: keep generic */ }
-  }
+  const model = task.modelState?.model ?? task.selection?.model;
+  let thinking = task.modelState?.thinking ?? task.selection?.thinking;
+  let defaulted = false;
+  if (!thinking && task.engine === "codex") { try { thinking = defaultEffort(); defaulted = true; } catch { /* invalid env */ } }
   return safeText([
-    task.engine === "codex" ? "OpenAI / Codex" : task.engine === "claude" ? "Claude" : "Antigravity",
-    confirmed?.model ? `${confirmed.model} (confirmado)` : requested?.model ? `${requested.model} (solicitado)` : "modelo predeterminado",
-    confirmed?.thinking ? `thinking ${confirmed.thinking} (confirmado)` : requested?.thinking ? `thinking ${requested.thinking} (solicitado)` : fallbackThinking,
-    task.permissionMode === "yolo" ? "YOLO autorizado (esta tarea)" : "permisos restringidos",
-  ].join(" · ")).replace(/\n/g, " ");
+    task.engine === "codex" ? "Codex" : task.engine === "claude" ? "Claude" : "Antigravity",
+    model ? modelName(model) : "modelo por defecto",
+    thinking ? `razonamiento ${thinkingName(thinking)}${defaulted ? " (por defecto)" : ""}` : undefined,
+    task.permissionMode === "yolo" ? "YOLO (solo esta tarea)" : undefined,
+    task.web ? "con internet" : undefined,
+  ].filter(Boolean).join(" · ")).replace(/\n/g, " ");
+}
+
+/** Where the model and level came from, for the detail view. */
+export function selectionDetail(task: TaskView): string | undefined {
+  const parts: string[] = [];
+  if (task.selection?.model) parts.push(`modelo pedido: ${task.selection.model}${task.modelState?.model && task.modelState.model !== task.selection.model ? ` → usado: ${task.modelState.model}` : ""}`);
+  else if (task.modelState?.model) parts.push(`modelo usado: ${task.modelState.model}`);
+  if (task.selection?.thinking) parts.push(`razonamiento pedido: ${task.selection.thinking}`);
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
+/**
+ * A human title: the model's short label, else the prompt's first sentence with
+ * absolute paths reduced to their last name, bounded to 60 columns at a word.
+ */
+export function shortTitle(text: string): string {
+  let line = oneLine(text).replace(/(?:~|\/(?:Users|home|private|var|tmp|opt|Volumes))?(?:\/[^\s/'"`]+)+\/?/g, (path) => path.replace(/\/+$/, "").split("/").pop() ?? path);
+  const sentence = /^(.{12,}?[.!?])(?:\s|$)/.exec(line);
+  if (sentence) line = sentence[1]!.replace(/[.]$/, "");
+  if (line.length <= 60) return line;
+  const cut = line.slice(0, 59);
+  return `${cut.slice(0, cut.lastIndexOf(" ") > 30 ? cut.lastIndexOf(" ") : 59)}…`;
+}
+export const displayTitle = (task: TaskView) => task.label ?? shortTitle(task.title);
+
+/** Same request reworded: at least half of the significant words (4+ letters) in common. */
+function similar(a: string, b: string): boolean {
+  const words = (text: string) => new Set(shortTitle(text).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^a-z0-9-]+/).filter((word) => word.length >= 4));
+  const left = words(a), right = words(b);
+  if (left.size < 2 || right.size < 2) return false;
+  const shared = [...left].filter((word) => right.has(word)).length;
+  return shared / Math.min(left.size, right.size) >= 0.5 && shared >= 2;
+}
+
+/** A cancelled/failed root repeated later by a task with the same engine and a similar request. */
+export function supersededBy(task: TaskView, tasks: TaskView[]): TaskView | undefined {
+  if (task.state !== "cancelled" && task.state !== "failed") return undefined;
+  return tasks.find((other) => other.id !== task.id && other.engine === task.engine && other.parentId === task.parentId
+    && Date.parse(other.createdAt) > Date.parse(task.createdAt) && (other.title === task.title || (task.label !== undefined && other.label === task.label) || similar(other.title, task.title)));
 }
 
 /** Spanish wording for the human; the raw message is kept for machines and expanded views. */
@@ -216,7 +291,7 @@ export function failureAdvice(task: TaskView): string {
 
 /** Technical one-liner with the short ID: archives, history and the transcript. */
 export function taskLine(task: TaskView, prefix = "", attention?: Attention): string {
-  return `${prefix}${stateIcon[task.state]} ${task.engine} ${task.id.slice(0, 8)} · ${taskPhase(task, attention)} · ${oneLine(task.title)}`;
+  return `${prefix}${stateIcon[task.state]} ${task.engine} ${task.id.slice(0, 8)} · ${taskPhase(task, attention)} · ${displayTitle(task)}`;
 }
 
 /**
@@ -237,10 +312,10 @@ export function clip(text: string, width: number): string {
 /** Human row for the widget and panel: no IDs; title shrinks first so status stays visible. */
 export function taskRow(task: TaskView, prefix: string, width: number, tasks: TaskView[] = [], attention?: Attention, now = Date.now()): string {
   const detail = taskDetail(task, tasks, attention, now).text;
-  const right = [taskPhase(task, attention), detail, elapsed(task, now)].filter(Boolean).join(" · ");
+  const right = [taskPhase(task, attention), supersededBy(task, tasks) ? "sustituida" : undefined, detail, elapsed(task, now)].filter(Boolean).join(" · ");
   const left = `${prefix}${stateIcon[task.state]} ${engineName(task.engine).padEnd(6)} `;
   const room = Math.max(8, width - visibleWidth(left) - visibleWidth(right) - 2);
-  const title = clip(oneLine(task.title), room);
+  const title = clip(displayTitle(task), room);
   return clip(`${left}${title}${" ".repeat(Math.max(1, room - visibleWidth(title) + 1))} ${right}`, Math.max(1, width));
 }
 
@@ -250,20 +325,22 @@ export function taskCardParts(task: TaskView, expanded = false, attention?: Atte
   const preview = expanded || result.length <= 480 ? result : `${result.slice(0, 480)}…`;
   const tokens = formatTokens(task.usage) ?? contextLabel(task);
   const head = [
-    `${stateIcon[task.state]} ${taskPhase(task, attention)} · ${elapsed(task)}${tokens ? ` · ${tokens}` : ""}`,
-    oneLine(task.title), modelLabel(task),
+    `${stateIcon[task.state]} ${displayTitle(task)}`,
+    `${taskPhase(task, attention)} · ${elapsed(task)}${tokens ? ` · ${tokens}` : ""}`,
+    modelLabel(task),
   ];
-  if (!isTerminal(task) && task.lastActivity) head.push(`Última acción reportada por el motor: ${activityLabel(task.lastActivity)}`);
+  if (!isTerminal(task) && task.lastActivity) head.push(`Ahora: ${activityLabel(task.lastActivity)}`);
   const tail: string[] = [];
   const changes = changesLine(task);
   if (changes) tail.push(changes);
-  if (task.web) tail.push("Con acceso a internet (autorizado por ti para esta tarea).");
+  if (task.web && expanded) tail.push("Con acceso a internet (autorizado por ti para esta tarea).");
   if (task.state === "failed") tail.push(failureAdvice(task));
   if (expanded) {
     tail.push(`Tarea: ${task.id} · intento: ${task.attemptId}`, `Workspace: ${safeText(task.cwd)}`, `Sesión nativa: ${safeText(task.runtimeSessionId ?? "no registrada")}`);
     if (task.error && friendlyError(task.error) !== safeText(task.error)) tail.push(`Error original: ${safeText(task.error)}`);
-    if (task.selection?.model && task.modelState?.model && task.selection.model !== task.modelState.model) tail.push(`Modelo solicitado: ${safeText(task.selection.model)}`);
-  } else tail.push(`/orch result ${task.id.slice(0, 8)} · /orch abre el panel${result.length > 480 ? " · expande para leer más" : ""}`);
+    const selection = selectionDetail(task);
+    if (selection) tail.push(safeText(selection));
+  } else tail.push(`/orch para abrir el panel${result.length > 480 ? " · expande para leer más" : ""}`);
   return {
     head: safeText(head.join("\n")),
     ...(preview ? { body: { text: task.error ? `Motivo: ${preview}` : preview, markdown: !task.error && task.state === "completed" } } : {}),
@@ -351,8 +428,8 @@ export function helpText(advanced: string): string {
     "  /orch claude: resume el README   (directo: sin pasar por el modelo principal)",
     "",
     "Panel: /orch (o /orch panel)",
-    "  ↑↓ elegir · s redirigir · r reanudar · R reintentar · e editor · i insertar en el chat",
-    "  y copiar · a aplicar cambios · x descartar cambios · c cancelar · d detalles · f filtro",
+    "  ↑↓ elegir · s redirigir · r continuar · R reintentar · e editor · i insertar en el chat",
+    "  y copiar · a aplicar cambios · x descartar cambios · c cancelar (y sus subtareas) · d detalles · f filtro",
     "  PgUp/PgDn leer · Esc volver",
     "",
     "YOLO en un repositorio git: la tarea escribe en un worktree aislado y con sandbox;",

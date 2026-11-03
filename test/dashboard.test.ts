@@ -55,7 +55,7 @@ test("cancel requires explicit confirmation, Esc first rejects confirmation then
   const calls: string[] = [];
   const state = setup(async (id) => { calls.push(id); return { ...task(id), state: "cancelled", endedAt: new Date().toISOString() }; });
   state.panel.handleInput("c");
-  assert.match(state.panel.render(100).join("\n"), /2 activas/);
+  assert.match(state.panel.render(100).join("\n"), /esta tarea y su subtarea\? y sí/, "plain wording: the task and its subtasks, no \"tree\"");
   assert.deepEqual(calls, []);
   state.panel.handleInput("\x1b");
   assert.equal(state.done, 0);
@@ -77,7 +77,7 @@ test("selection survives updates, child cancellation is scoped, only one stop is
     state.setTasks([task("parent-123"), { ...task("child-1234", "parent-123"), lastActivity: "Read" }]);
     state.panel.handleInput("c"); state.panel.handleInput("y");
     assert.deepEqual(calls, ["child-1234"]);
-    assert.match(state.panel.render(100).join("\n"), /esperando cierre/);
+    assert.match(state.panel.render(100).join("\n"), /esperando a que se cierren sus procesos/);
     state.panel.handleInput("c"); state.panel.handleInput("y");
     assert.equal(calls.length, 1);
     release(); await tick();
@@ -121,19 +121,19 @@ test("details and filters are opt-in, preserve selection when possible and do no
   try {
     state.setTasks([{ ...task("ended-123"), state: "completed" }, task("active-123"), { ...task("failed-123"), state: "failed", error: "fixture failure" }]);
     let screen = state.panel.render(160).join("\n");
-    // Urgency order without IDs in rows: failed, then live work, then finished history.
+    // Live work first; finished work (failures included) below it, without IDs.
     const [failedAt, activeAt, endedAt] = ["! codex", "● codex", "✓ codex"].map((marker) => screen.indexOf(marker)) as [number, number, number];
-    assert.ok(failedAt >= 0 && failedAt < activeAt && activeAt < endedAt, "rows are ordered by urgency");
+    assert.ok(activeAt >= 0 && activeAt < failedAt && activeAt < endedAt, "live work is listed before finished work");
     assert.ok(!screen.split("\n").slice(3, 6).some((line) => line.includes("active-1")), "human rows carry no technical IDs");
     assert.ok(!screen.includes("Intento:"));
     state.panel.handleInput("d");
     assert.match(state.panel.render(160).join("\n"), /Intento:/);
     state.panel.handleInput("f");
     screen = state.panel.render(160).join("\n");
-    assert.match(screen, /filtro: activas/); assert.ok(!screen.includes("failed-1"));
+    assert.match(screen, /mostrando activas/); assert.ok(!screen.includes("failed-1"));
     state.panel.handleInput("f");
     screen = state.panel.render(160).join("\n");
-    assert.match(screen, /filtro: fallidas/); assert.match(screen, /fixture failure/);
+    assert.match(screen, /mostrando fallidas/); assert.match(screen, /fixture failure/);
     state.setTasks([task("active-123")]);
     assert.match(state.panel.render(160).join("\n"), /No hay tareas con este filtro/);
     assert.equal(cancellations, 0);

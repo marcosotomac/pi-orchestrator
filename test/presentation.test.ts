@@ -6,18 +6,20 @@ const task: TaskView = { id: "12345678-task", attemptId: "private-attempt", engi
 
 test("presentation distinguishes requested from confirmed model/thinking and only shows technical details on expansion", () => {
   const compact = taskCard(task);
-  assert.match(compact, /gemini-3.8-flash \(solicitado\)/);
-  assert.match(compact, /thinking high \(solicitado\)/);
+  // Plain words in the card; where model and level came from is in the expanded view.
+  assert.match(compact, /Gemini 3\.8 Flash · razonamiento alto/);
+  assert.ok(!compact.includes("(solicitado)") && !compact.includes("(confirmado)"));
+  assert.match(taskCard(task, true), /modelo pedido: gemini-3\.8-flash · razonamiento pedido: high/);
   assert.ok(!compact.includes("private-attempt"));
   assert.ok(!compact.includes("/workspace"));
-  assert.match(compact, /\/orch result 12345678/);
+  assert.match(compact, /\/orch para abrir el panel/);
   assert.match(taskCard(task, true), /private-attempt/);
   const confirmed = modelLabel({ ...task, modelState: { model: "native-model", thinking: "high", availableModels: [], availableThinking: [] } });
-  assert.match(confirmed, /native-model \(confirmado\)/);
-  assert.match(confirmed, /high \(confirmado\)/);
+  assert.match(confirmed, /Native Model · razonamiento alto/);
+  assert.match(taskCard({ ...task, modelState: { model: "native-model", thinking: "high", availableModels: [], availableThinking: [] } }, true), /modelo pedido: gemini-3\.8-flash → usado: native-model/);
 });
 test("phases reflect host observations, never infer progress or waiting from provider activity text", () => {
-  assert.equal(taskPhase(task), "iniciando sesión");
+  assert.equal(taskPhase(task), "arrancando");
   assert.equal(taskPhase({ ...task, runtimeSessionId: "session", lastActivity: "99% waiting for parent" }), "trabajando");
   assert.equal(taskPhase(task, "permission"), "esperando tu permiso");
   assert.equal(taskPhase(task, "question"), "esperando tu respuesta");

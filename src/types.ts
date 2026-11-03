@@ -65,6 +65,10 @@ export interface TaskView {
   error?: string;
   diagnostic?: import("./diagnostics.ts").FailureDiagnostic;
   usage?: TaskUsage;
+  /** Short human label (2–6 words) chosen by the delegating model; display only. */
+  label?: string;
+  /** The last few reported actions with their time (newest last); display only, not journaled. */
+  recentActivity?: { at: string; text: string }[];
   /** Operator-granted internet access for this task (search/fetch tools); never inherited. */
   web?: boolean;
   /** Context window occupancy a runtime reports (Antigravity usage_update); not consumption. */

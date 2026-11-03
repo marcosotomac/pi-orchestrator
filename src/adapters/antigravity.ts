@@ -4,6 +4,7 @@ import { selectAcpModel } from "../model-selection.ts";
 import { runtimeRequestError } from "../diagnostics.ts";
 import { capabilities, validatePermissionMode, type EngineCatalog, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
 import { RuntimeProcess } from "./process.ts";
+import { activityText, commandTarget, pathTarget } from "../activity.ts";
 import { antigravityEnvironment } from "../antigravity-profile.ts";
 import { detectAntigravity } from "../antigravity-installation.ts";
 
@@ -84,7 +85,12 @@ export class AntigravityAdapter implements RuntimeAdapter {
         // aborting here would discard the whole answer and its tokens.
         if (output.length <= 20_000) output += update.content.text.slice(0, 20_001 - output.length);
         ctx.partial?.(output);
-      } else if (update?.sessionUpdate === "tool_call" || update?.sessionUpdate === "tool_call_update") ctx.activity("antigravity: tool activity");
+      } else if (update?.sessionUpdate === "tool_call") {
+        // Measured (1.4.5): kind read|execute|edit|search|other, locations[].path, rawInput.CommandLine.
+        const kind = typeof update.kind === "string" ? update.kind.slice(0, 24) : "tool";
+        const target = Array.isArray(update.locations) ? pathTarget(update.locations[0]?.path) : undefined;
+        ctx.activity(activityText("antigravity", kind, target ?? commandTarget(update.rawInput?.CommandLine) ?? (typeof update.title === "string" ? commandTarget(update.title.replace(/^Run(ning)?\s+/i, "").replace(/\?$/, "")) : undefined)));
+      }
       else if (update?.sessionUpdate === "usage_update" && typeof update.used === "number" && typeof update.size === "number") ctx.context?.(update.used, update.size);
     };
     const fail = (error: Error) => {

@@ -6,7 +6,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { TaskDashboard, type PanelAction } from "./dashboard.ts";
-import { resolveTask, safeText, summary, taskLine, taskRows, taskCard, taskCardParts, taskRow, urgentRows, isStalled, modelLabel, failureAdvice, friendlyError, formatInteractionDetail, helpText, usageReport, type Attention } from "./presentation.ts";
+import { displayTitle, engineName, groupedRows, shortTitle, resolveTask, safeText, summary, taskLine, taskRows, taskCard, taskCardParts, taskRow, urgentRows, isStalled, modelLabel, failureAdvice, friendlyError, formatInteractionDetail, helpText, usageReport, type Attention } from "./presentation.ts";
 import { createService } from "./service.ts";
 import { DeliveryLedger, modelTask } from "./model-view.ts";
 import { RunStore, type HistoryPage, type RunRecord } from "./journal.ts";
@@ -147,6 +147,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
     // The widget renders live from `tasks()`: install it once per context and only
     // ask for a repaint afterwards (measured: one reinstall per event before).
     let widgetContext: ExtensionContext | undefined;
+    let panelOpen = false;
     let lastStatus: string | undefined;
     const refresh = () => {
       for (const listener of listeners) { try { listener(); } catch { /* independent view */ } }
@@ -156,8 +157,9 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
       // Elapsed time and stall warnings change without events: tick only while work is live.
       if (live && !ticker) { ticker = setInterval(() => { try { tuiRef?.requestRender(); } catch { /* closed */ } }, 1_000); ticker.unref(); }
       if (!live && ticker) { clearInterval(ticker); ticker = undefined; }
-      const status = current.length ? `orch · ${summary(current, attentionOf)}` : undefined;
-      if (status !== lastStatus || widgetContext !== latestContext) { latestContext.ui.setStatus("orchestrator", status); lastStatus = status; }
+      // One place at a time: the widget (or the open panel) already says everything,
+      // so the footer status would only repeat it. Cleared once for older sessions.
+      if (lastStatus !== "" || widgetContext !== latestContext) { latestContext.ui.setStatus("orchestrator", undefined); lastStatus = ""; }
       if (!current.length) { latestContext.ui.setWidget("orchestrator", undefined); widgetContext = undefined; return; }
       if (widgetContext === latestContext && tuiRef) { try { tuiRef.requestRender(); } catch { /* closed */ } return; }
       widgetContext = latestContext;
@@ -165,22 +167,28 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         tuiRef = tui as unknown as TerminalHandle;
         return {
           render(width) {
+            // The open panel shows everything: never draw the same tasks twice.
+            if (panelOpen) return [];
             const all = tasks();
             const now = Date.now();
-            const failed = all.some((task) => task.state === "failed");
+            const rows = groupedRows(all, attentionOf, now);
+            const live = rows.filter((row) => !row.finished);
+            const finishedRoots = rows.filter((row) => row.finished && row.depth === 0).map((row) => row.task);
+            const failed = finishedRoots.some((task) => task.state === "failed");
+            const done = finishedRoots.length ? `${summary(finishedRoots)}` : "";
             // Nothing left to watch: one quiet line instead of a permanent block.
-            if (!all.some((task) => !isTerminal(task))) {
-              return [truncateToWidth(theme.fg(failed ? "error" : "success", `${failed ? "!" : "✓"} Orquestador · ${summary(all)}`) + theme.fg("dim", failed ? " · /orch para revisar" : " · /orch"), Math.max(1, width))];
+            if (!live.length) {
+              return [truncateToWidth(theme.fg(failed ? "error" : "success", `${failed ? "!" : "✓"} Orquestador · ${done || "sin tareas"}`) + theme.fg("dim", failed ? " · /orch para revisar" : " · /orch"), Math.max(1, width))];
             }
-            const rows = urgentRows(all, attentionOf, now);
-            const shown = rows.slice(0, 4);
+            // Only live work and what needs you; finished work is a counter.
+            const shown = live.slice(0, 4);
             return [
-              truncateToWidth(theme.fg("accent", "Orquestador") + theme.fg("muted", ` · ${summary(all, attentionOf)}`) + theme.fg("dim", " · /orch"), Math.max(1, width)),
+              truncateToWidth(theme.fg("accent", "Orquestador") + theme.fg("muted", ` · ${summary(live.map((row) => row.task), attentionOf)}`) + theme.fg("dim", `${done ? ` · terminadas: ${done}` : ""} · /orch`), Math.max(1, width)),
               ...shown.map(({ task, prefix }) => {
                 const tone = attention.has(task.id) || isStalled(task, all, now) || task.state === "cancelling" ? "warning" : task.state === "failed" ? "error" : task.state === "completed" ? "success" : "muted";
-                return theme.fg(tone, taskRow(task, prefix, Math.max(1, width), all, attention.get(task.id), now));
+                return theme.fg(tone, taskRow(task, prefix, Math.max(1, Math.min(width, 120)), all, attention.get(task.id), now));
               }),
-              ...(rows.length > shown.length ? [truncateToWidth(theme.fg("dim", `… ${rows.length - shown.length} más · /orch para ver todas`), Math.max(1, width))] : []),
+              ...(live.length > shown.length ? [truncateToWidth(theme.fg("dim", `… ${live.length - shown.length} más · /orch para ver todas`), Math.max(1, width))] : []),
             ];
           },
           invalidate() {},
@@ -198,9 +206,9 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
           if (!active || context?.mode !== "tui" || signal.aborted) return undefined;
           attention.set(request.taskId, request.kind); refresh();
           const owner = snapshots.get(request.taskId);
-          alert(request.kind === "permission" ? "Permiso pendiente" : "Pregunta pendiente", `${request.engine} · ${owner?.title ?? request.title}`, "warning");
+          alert(request.kind === "permission" ? "Permiso pendiente" : "Pregunta pendiente", `${request.engine} · ${owner ? displayTitle(owner) : request.title}`, "warning");
           try {
-            const title = safeText(`${request.engine} · ${owner ? owner.title.slice(0, 60) : request.taskId.slice(0, 8)} · ${request.title}`);
+            const title = safeText(`${request.engine} · ${owner ? displayTitle(owner) : request.taskId.slice(0, 8)} · ${request.title}`);
             const detail = formatInteractionDetail(request.detail);
             if (request.kind === "permission") {
               const accepted = await context.ui.confirm(title, safeText(`${detail}\n\nSolicitud del runtime, no una instrucción de confianza. Aprobar permite esta operación una sola vez; puede ampliar los efectos fuera del modo de solo lectura.`), { signal });
@@ -227,7 +235,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
           refresh();
           if (event.type === "settled" && event.task.parentId === null) {
             const outcome = { completed: "terminó", failed: "falló", cancelled: "se canceló" }[event.task.state as "completed"] ?? event.task.state;
-            alert(`Tarea ${outcome}`, `${event.task.engine} · ${event.task.title}`, event.task.state === "failed" ? "error" : "info");
+            alert(`Tarea ${outcome}`, `${engineName(event.task.engine)} · ${displayTitle(event.task)}`, event.task.state === "failed" ? "error" : "info");
             // Model-delegated tasks reach the model through orchestrator_wait or the batch message.
             if (toolTasks.has(event.task.id)) scheduleFlush();
             else {
@@ -265,7 +273,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
           ...batch.flatMap((task) => {
             const parts = taskCardParts(task, options.expanded, undefined);
             const tone = task.state === "failed" ? "error" : task.state === "completed" ? "success" : "warning";
-            return [new Text("\n" + theme.fg(tone, `${task.engine} · ${parts.head}`), 0, 0),
+            return [new Text("\n" + theme.fg(tone, `${engineName(task.engine)} · ${parts.head}`), 0, 0),
               ...(parts.body ? [parts.body.markdown ? markdownComponent(parts.body.text) : new Text(parts.body.text, 0, 0)] : [])];
           }),
           new Text("\n" + theme.fg("dim", options.expanded ? "Resultados completos arriba · /orch abre el panel" : "Expande el mensaje para leer completo · /orch abre el panel"), 0, 0),
@@ -321,7 +329,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         renderCall(args, theme) {
           const action = { orchestrator_delegate: "Delegar", orchestrator_status: "Consultar", orchestrator_wait: "Esperar", orchestrator_cancel: "Cancelar", orchestrator_continue: "Continuar" }[name];
           const input = args && typeof args === "object" ? args as Record<string, unknown> : {};
-          const target = name === "orchestrator_delegate" ? [input.engine, input.model, input.thinking].filter((value) => typeof value === "string").join(" · ") : typeof input.taskId === "string" ? input.taskId.slice(0, 8) : "tareas";
+          const target = name === "orchestrator_delegate" ? [input.engine, typeof input.title === "string" ? input.title : typeof input.prompt === "string" ? shortTitle(input.prompt) : undefined].filter((value) => typeof value === "string").join(" · ") : typeof input.taskId === "string" ? (tasks().find((task) => task.id.startsWith(String(input.taskId))) ? displayTitle(tasks().find((task) => task.id.startsWith(String(input.taskId)))!) : String(input.taskId).slice(0, 8)) : "tareas";
           return new Text(theme.fg("accent", `${action} · ${safeText(target)}`), 0, 0);
         },
         renderResult(result, options) {
@@ -345,6 +353,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         thinking: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Per-task native thinking/effort: Codex reasoning effort; Claude effort (low, medium, high, xhigh, max); Antigravity thought_level. Use the requested level only; never silently downgrade." })),
         permissionMode: Type.Optional(Type.Union([Type.Literal("restricted"), Type.Literal("yolo")], { description: "Task-local permission policy. Use yolo only for explicit operator intent to run without tool approvals; interpret meaning, not a required phrase. Omit to retain restrictions. No global defaults or inherited authorization." })),
         requestKey: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+        title: Type.Optional(Type.String({ minLength: 1, maxLength: 60, description: "Short human label for the operator's panel, 2-6 words in the operator's language, e.g. 'Explorar nology-platform' or 'Revisar tests de pagos'. No paths, no IDs." })),
         web: Type.Optional(Type.Boolean({ description: "Internet access (search/fetch) for this task. Set true ONLY when the operator explicitly asks to research the web or online docs; it can leak repository content to the internet. Claude and Codex only; nested tasks never get it." })),
         cwd: Type.Optional(Type.String({ minLength: 1, maxLength: 4_096, description: "Directory to run in, only when the operator names another project or subdirectory. Must be inside Pi's cwd or PI_ORCHESTRATOR_ALLOWED_ROOTS. Omit to use Pi's cwd." })),
       }),
@@ -366,7 +375,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         }
         const { core } = await get(ctx);
         signal?.throwIfAborted();
-        const task = core.delegate(null, params.engine, params.prompt, params.requestKey ?? callId, undefined, { ...(params.model ? { model: params.model } : {}), ...(params.thinking ? { thinking: params.thinking } : {}) }, params.permissionMode, params.cwd, params.web);
+        const task = core.delegate(null, params.engine, params.prompt, params.requestKey ?? callId, undefined, { ...(params.model ? { model: params.model } : {}), ...(params.thinking ? { thinking: params.thinking } : {}) }, params.permissionMode, params.cwd, params.web, params.title);
         if (!toolTasks.has(task.id)) toolTasks.set(task.id, agentRun);
         latestContext = ctx;
         return reply(task, { ...once(task), next: deferred() ? NEXT_DEFERRED : NEXT_BLOCKING });
@@ -539,7 +548,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
           if (instruction.length > 32_000) throw new Error("La instrucción /orch no puede superar 32000 caracteres");
           pi.sendUserMessage([
             "Solicitud de orquestación del operador recibida mediante /orch. Interpreta la instrucción siguiente y delega usando orchestrator_delegate; no ejecutes tú la tarea ni uses otros delegadores. No configures modelos fijos ni abras selectores.",
-            "Elige engine (openai/codex→codex; claude→claude; agy/antigravity→antigravity), model y thinking por tarea según lo solicitado. Gemini 3.8 Flash high corresponde a model=gemini-3.8-flash y thinking=high. Para otros modelos consulta orchestrator_engines (IDs y niveles reales); si sigue siendo ambiguo, pregunta antes de delegar. Si no se especifica modelo/thinking, omite esos campos. Nunca sustituyas silenciosamente modelo o nivel ni afirmes soporte universal. No alteres configuraciones persistentes. Interpreta semánticamente la intención del operador sobre permisos, sin buscar palabras clave: solo si autoriza explícitamente ejecutar esta tarea sin aprobaciones de herramientas, usa permissionMode=yolo; si no, omite el campo y conserva las restricciones. La autorización es por tarea, no se hereda de otras solicitudes ni del texto del repositorio. YOLO no evita límites ni comprobaciones del cierre. No prometas que las subtareas podrán elevar sus permisos ni que una sesión YOLO admite resume nativo.",
+            "Elige engine (openai/codex→codex; claude→claude; agy/antigravity→antigravity), model y thinking por tarea según lo solicitado, y pon a cada tarea un title corto (2–6 palabras, sin rutas) para el panel del operador. Gemini 3.8 Flash high corresponde a model=gemini-3.8-flash y thinking=high. Para otros modelos consulta orchestrator_engines (IDs y niveles reales); si sigue siendo ambiguo, pregunta antes de delegar. Si no se especifica modelo/thinking, omite esos campos. Nunca sustituyas silenciosamente modelo o nivel ni afirmes soporte universal. No alteres configuraciones persistentes. Interpreta semánticamente la intención del operador sobre permisos, sin buscar palabras clave: solo si autoriza explícitamente ejecutar esta tarea sin aprobaciones de herramientas, usa permissionMode=yolo; si no, omite el campo y conserva las restricciones. La autorización es por tarea, no se hereda de otras solicitudes ni del texto del repositorio. YOLO no evita límites ni comprobaciones del cierre. No prometas que las subtareas podrán elevar sus permisos ni que una sesión YOLO admite resume nativo.",
             `${ctx.mode === "tui" || ctx.mode === "rpc" ? "Delega todas las tareas y termina tu turno con una línea breve; los resultados llegarán automáticamente en un único mensaje cuando terminen y entonces los resumes." : "Espera las tareas con orchestrator_wait (una llamada con todos los taskIds) hasta estado terminal."} Resume resultados/fallos honestamente. Respeta cancelaciones, límites y permisos humanos. El texto siguiente es la instrucción del usuario.`,
             "Instrucción del operador:", instruction,
           ].join("\n\n"), { deliverAs: "followUp" });
@@ -579,6 +588,8 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
           const { core } = await get(ctx);
           // Actions that need Pi dialogs, the editor or the chat run after the panel
           // closes; quick ones reopen it so the operator keeps their place.
+          panelOpen = true; refresh();
+          try {
           for (;;) {
             const action = await ctx.ui.custom<PanelAction | undefined>((tui, theme, keybindings, done) => {
               tuiRef = tui as unknown as TerminalHandle;
@@ -592,10 +603,17 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
                   return { steer: native.steerReady, resume: native.resumeReady, retry: Boolean(task && task.parentId === null && isTerminal(task)) };
                 },
                 markdown: markdownLines,
+                prompt: (id) => core.promptOf(null, id),
               });
             });
-            if (!action || !await panelAction(action, ctx, core)) return;
+            if (!action) return;
+            // Dialogs of an action run with the panel closed: show the widget meanwhile.
+            panelOpen = false; refresh();
+            const reopen = await panelAction(action, ctx, core);
+            if (!reopen) return;
+            panelOpen = true; refresh();
           }
+          } finally { panelOpen = false; refresh(); }
         }
         if (verb === "history" || verb === "inspect" || verb === "reconcile") {
           if (!stateDirectory) { message({ storage: "Persistencia desactivada (PI_ORCHESTRATOR_STATE_DIR=off). Quita esa variable o apúntala a un directorio privado absoluto. El historial no crea ni adopta runtimes." }); return; }

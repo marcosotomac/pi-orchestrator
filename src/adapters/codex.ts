@@ -1,6 +1,7 @@
 import { capabilities, validatePermissionMode, yoloSandbox, type EngineCatalog, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
 import { RuntimeProcess } from "./process.ts";
 import { WORKER_CONTRACT } from "../worker-contract.ts";
+import { activityText, commandTarget, pathTarget } from "../activity.ts";
 
 interface McpServerRow { name: string; runtimeStatus?: string | null }
 
@@ -118,6 +119,8 @@ export class CodexAdapter implements RuntimeAdapter {
       if (method === "item/started") {
         context.activity(item?.type === "mcpToolCall"
           ? `codex: mcp/${String(item.server)}/${String(item.tool)}`
+          : item?.type === "commandExecution" ? activityText("codex", "commandExecution", commandTarget(item.command))
+          : item?.type === "fileChange" ? activityText("codex", "fileChange", Array.isArray(item.changes) ? [...new Set(item.changes.map((change: any) => pathTarget(change?.path)).filter(Boolean))].slice(0, 3).join(", ") || undefined : undefined)
           : `codex: ${String(item?.type ?? "item")}`);
       }
       if (method === "item/completed" && item?.type === "mcpToolCall") {

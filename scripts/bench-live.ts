@@ -79,7 +79,7 @@ for (let run = 1; run <= Number(runsArg ?? 1); run++) {
   const evidence = tasks.filter((t) => /\b[\w/.-]+\.ts:\d+/.test(t.result ?? "")).length;
   const row = { label, scenario, run, totalS: Math.round(total / 1000), chatBlockedS: Math.round(blockedMs / 1000), firstReturnS: Math.round(firstReturn / 1000),
     mainTurns: assistants.length, phaseTools, mainInput: main.input, mainCached: main.cached, mainOutput: main.output, toolCalls,
-    workers: tasks.map((t) => ({ engine: t.engine, state: t.state, model: t.modelState?.model ?? t.selection?.model ?? "default", tokens: t.usage ? t.usage.inputTokens + t.usage.outputTokens : null, costUsd: t.usage?.costUsd ?? null, seconds: Math.round((Date.parse(t.endedAt) - Date.parse(t.createdAt)) / 1000), evidence: /\b[\w/.-]+\.ts:\d+/.test(t.result ?? "") })),
+    workers: tasks.map((t) => ({ engine: t.engine, label: t.label, state: t.state, model: t.modelState?.model ?? t.selection?.model ?? "default", tokens: t.usage ? t.usage.inputTokens + t.usage.outputTokens : null, costUsd: t.usage?.costUsd ?? null, seconds: Math.round((Date.parse(t.endedAt) - Date.parse(t.createdAt)) / 1000), evidence: /\b[\w/.-]+\.ts:\d+/.test(t.result ?? "") })),
     workerTokens: tasks.reduce((a, t) => a + (t.usage ? t.usage.inputTokens + t.usage.outputTokens : 0), 0), workerCostUsd: Number(tasks.reduce((a, t) => a + (t.usage?.costUsd ?? 0), 0).toFixed(4)),
     checks, correct: Object.values(checks).filter(Boolean).length + "/" + Object.keys(checks).length, evidenceRate: tasks.length ? `${evidence}/${tasks.length}` : "-", errors, emptyTurns, lastText: lastText.slice(0, 200), final: final.slice(0, 1500) };
   console.log(JSON.stringify(row));

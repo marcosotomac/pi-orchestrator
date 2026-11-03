@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { capabilities, validatePermissionMode, yoloSandbox, RuntimeCleanupError, type EngineCatalog, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
 import { RuntimeProcess } from "./process.ts";
 import { WORKER_CONTRACT } from "../worker-contract.ts";
+import { activityText, commandTarget, pathTarget } from "../activity.ts";
 
 /** Bounded integer from the environment; invalid values fail closed. */
 export function claudeLimit(name: string, fallback: number, min: number, max: number, env: NodeJS.ProcessEnv = process.env): number {
@@ -101,7 +102,11 @@ export class ClaudeAdapter implements RuntimeAdapter {
         if (message.type === "assistant") {
           if (!Array.isArray(message.message?.content)) throw new Error("Claude returned invalid assistant content");
           for (const block of message.message.content) {
-            if (block.type === "tool_use") context.activity(`claude: ${String(block.name)}`);
+            if (block.type === "tool_use") {
+              const input = block.input && typeof block.input === "object" ? block.input : {};
+              const target = pathTarget(input.file_path ?? input.path) ?? commandTarget(input.command ?? input.pattern ?? input.query ?? input.url);
+              context.activity(activityText("claude", String(block.name), target));
+            }
           }
           // Kept so a turn/budget limit does not discard everything Claude wrote.
           const text = message.message.content.filter((block: any) => block?.type === "text" && typeof block.text === "string").map((block: any) => block.text).join("\n").trim();

@@ -14,7 +14,7 @@ test("permission authority is explicit, task-local, idempotent and cannot be esc
   try {
     const root = core.delegate(null, "codex", "fixture", "root", undefined, undefined, "yolo");
     assert.equal(root.permissionMode, "yolo");
-    assert.match(taskCard(root), /YOLO autorizado \(esta tarea\)/);
+    assert.match(taskCard(root), /YOLO \(solo esta tarea\)/);
     assert.equal(core.delegate(null, "codex", "fixture", "root", undefined, undefined, "yolo").id, root.id);
     assert.throws(() => core.delegate(null, "codex", "fixture", "root"), /different arguments/);
     assert.throws(() => core.delegate(root.id, "codex", "fixture", "escalation", undefined, undefined, "yolo"), /Only the operator/);

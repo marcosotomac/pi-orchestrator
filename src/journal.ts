@@ -25,6 +25,7 @@ const taskSchema = z.object({
   diagnostic: z.object({ category: z.enum(["authentication", "network", "quota", "transient", "protocol", "cleanup", "unknown"]), recovery: z.string().max(512), automaticRetry: z.boolean() }).strict().optional(),
   result: z.string().max(20_000).optional(), partialResult: z.string().max(20_000).optional(), error: z.string().max(8_000).optional(),
   web: z.boolean().optional(),
+  label: z.string().max(60).optional(),
   context: z.object({ used: z.number().int().nonnegative(), size: z.number().int().positive() }).strict().optional(),
   workspace: z.enum(["worktree", "in-place"]).optional(),
   changes: z.object({ state: z.enum(["pending", "applied", "discarded", "none"]), files: z.number().int().nonnegative(), insertions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(), summary: z.string().max(4_000), repo: z.string().max(8_192).optional(), worktree: z.string().max(8_192).optional(), patchPath: z.string().max(8_192).optional(), base: z.string().max(64).optional(), error: z.string().max(500).optional() }).strict().optional(),

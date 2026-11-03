@@ -20,8 +20,8 @@ function sessionServer(core: Orchestrator, caller: string, authorized: () => boo
   };
   server.registerTool("delegate", {
     description: "Delegate a read-only task to another real runtime. Reuse requestKey for retries. Returns task id; use wait for the result. Parent executions count toward concurrency. Never delegate unless your assigned task permits it. Nested tasks are restricted; only the operator can authorize YOLO, and it is not inherited.",
-    inputSchema: { permissionMode: z.enum(["restricted", "yolo"]).optional(), model: z.string().min(1).max(128).optional(), thinking: z.string().min(1).max(128).optional(), engine: z.enum(["codex", "claude", "antigravity"]), prompt: z.string().min(1).max(32_000), requestKey: z.string().min(1).max(128) },
-  }, guarded(({ engine, prompt, requestKey, model, thinking, permissionMode }: { engine: "codex" | "claude" | "antigravity"; prompt: string; requestKey: string; model?: string; thinking?: string; permissionMode?: "restricted" | "yolo" }) => core.delegate(caller, engine, prompt, requestKey, undefined, { ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) }, permissionMode)));
+    inputSchema: { permissionMode: z.enum(["restricted", "yolo"]).optional(), model: z.string().min(1).max(128).optional(), thinking: z.string().min(1).max(128).optional(), engine: z.enum(["codex", "claude", "antigravity"]), prompt: z.string().min(1).max(32_000), requestKey: z.string().min(1).max(128), title: z.string().min(1).max(60).optional().describe("Short human label, 2-6 words") },
+  }, guarded(({ engine, prompt, requestKey, model, thinking, permissionMode, title }: { engine: "codex" | "claude" | "antigravity"; prompt: string; requestKey: string; model?: string; thinking?: string; permissionMode?: "restricted" | "yolo"; title?: string }) => core.delegate(caller, engine, prompt, requestKey, undefined, { ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) }, permissionMode, undefined, undefined, title)));
   server.registerTool("status", {
     description: "Inspect your own task or a descendant. Ancestors and sibling tasks are forbidden.",
     inputSchema: { taskId: z.string() },
