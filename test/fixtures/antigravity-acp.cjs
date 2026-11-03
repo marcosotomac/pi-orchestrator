@@ -20,6 +20,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       token = server.headers[0].value; assert.equal(token, 'Bearer fixture-private-token');
       assert.ok(!process.argv.join(' ').includes(token));
       if (scenario === 'auth') return send({ id, error: { code: -32000, message: 'private provider error must not escape' } });
+      // Measured in Antigravity 1.4.5: notifications can precede the session/new response.
+      if (scenario === 'early-update' || scenario === 'early-foreign') send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: scenario === 'early-foreign' ? 'foreign' : 'fixture-session', update: { sessionUpdate: 'usage_update', used: 0, size: 1048576 } } });
       return send({ id, result: { sessionId: scenario === 'no-session' ? '' : 'fixture-session', modes: { availableModes: scenario === 'no-plan' ? [] : [{ id: 'default' }] } } });
     }
     if (method === 'session/set_mode') {

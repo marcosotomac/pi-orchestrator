@@ -25,6 +25,19 @@ export class AntigravityAdapter implements RuntimeAdapter {
     const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
     let promptRequestId: number | undefined;
     let nextId = 0, sessionId: string | undefined, prompting = false, stopping = false, output = "", protocolError: Error | undefined;
+    const early: any[] = [];
+    let earlyBytes = 0;
+    const onUpdate = (params: any) => {
+      if (!sessionId || params?.sessionId !== sessionId) throw new Error("Antigravity update has unknown session");
+      const update = params?.update;
+      if (update?.sessionUpdate === "agent_message_chunk") {
+        if (!prompting || update.content?.type !== "text" || typeof update.content.text !== "string") throw new Error("Invalid Antigravity agent text");
+        // Keep one char past the bound so the core detects and labels truncation;
+        // aborting here would discard the whole answer and its tokens.
+        if (output.length <= 20_000) output += update.content.text.slice(0, 20_001 - output.length);
+        ctx.partial?.(output);
+      } else if (update?.sessionUpdate === "tool_call" || update?.sessionUpdate === "tool_call_update") ctx.activity("antigravity: tool activity");
+    };
     const fail = (error: Error) => {
       protocolError ??= error;
       prompting = false;
@@ -89,15 +102,15 @@ export class AntigravityAdapter implements RuntimeAdapter {
             throw new Error("Antigravity requested unsupported client capability");
           }
           if (message.method === "session/update") {
-            if (!sessionId || message.params?.sessionId !== sessionId) throw new Error("Antigravity update has unknown session");
-            const update = message.params?.update;
-            if (update?.sessionUpdate === "agent_message_chunk") {
-              if (!prompting || update.content?.type !== "text" || typeof update.content.text !== "string") throw new Error("Invalid Antigravity agent text");
-              // Keep one char past the bound so the core detects and labels truncation;
-              // aborting here would discard the whole answer and its tokens.
-              if (output.length <= 20_000) output += update.content.text.slice(0, 20_001 - output.length);
-              ctx.partial?.(output);
-            } else if (update?.sessionUpdate === "tool_call" || update?.sessionUpdate === "tool_call_update") ctx.activity("antigravity: tool activity");
+            // Antigravity may notify (measured: usage_update) before answering
+            // session/new. Hold those, bounded, and validate them once the id is known.
+            if (!sessionId) {
+              earlyBytes += Buffer.byteLength(JSON.stringify(message.params ?? null));
+              if (early.length >= 64 || earlyBytes > 262_144) throw new Error("Antigravity pre-session update buffer exceeded");
+              early.push(message.params);
+              return;
+            }
+            onUpdate(message.params);
           }
           return;
         }
@@ -126,6 +139,8 @@ export class AntigravityAdapter implements RuntimeAdapter {
         sessionId = String(session.sessionId);
       }
       ctx.session(sessionId!);
+      // Same strict checks as live updates: a foreign session id still fails closed.
+      for (const params of early.splice(0)) onUpdate(params);
       if ((!ctx.resumeSessionId || session?.modes !== undefined) && (!Array.isArray(session?.modes?.availableModes) || !session.modes.availableModes.some((mode: any) => mode.id === "default"))) throw new Error("Antigravity ACP does not advertise required approval mode");
       await request("session/set_mode", { sessionId, modeId: "default" });
       ctx.modelState?.(await selectAcpModel(session, ctx.task.selection ?? {}, request, sessionId!));
