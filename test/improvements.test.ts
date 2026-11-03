@@ -11,8 +11,11 @@ import { taskCard, taskDetail } from "../src/presentation.ts";
 import { capabilities, type RuntimeContext, type TaskView } from "../src/types.ts";
 
 test("product defaults queue a root fan-out instead of rejecting it, and env still wins", async () => {
-  assert.deepEqual(productDefaults, { queuePolicy: "fair", maxConcurrent: 4, interactionTimeoutMs: 300_000, defaultSelection: { claude: { model: "sonnet" } } });
+  assert.deepEqual(productDefaults, { queuePolicy: "fair", maxConcurrent: 4, interactionTimeoutMs: 300_000, defaultSelection: { claude: { model: "sonnet" } }, isolateWrites: true });
   assert.equal({ ...productDefaults, ...runtimeConfiguration({ PI_ORCHESTRATOR_QUEUE: "reject" }) }.queuePolicy, "reject");
+  assert.equal({ ...productDefaults, ...runtimeConfiguration({ PI_ORCHESTRATOR_ISOLATE_WRITES: "0" }) }.isolateWrites, false);
+  assert.deepEqual(runtimeConfiguration({ PI_ORCHESTRATOR_ALLOWED_ROOTS: "/a:/b/c" }).allowedRoots, ["/a", "/b/c"]);
+  assert.throws(() => runtimeConfiguration({ PI_ORCHESTRATOR_ALLOWED_ROOTS: "relative" }), /absolute/);
   const blocked = async (ctx: RuntimeContext) => { await delay(60_000, undefined, { signal: ctx.signal }); return "x"; };
   const core = new Orchestrator({ cwd: process.cwd(), ...productDefaults, adapters: { codex: { capabilities, run: blocked } } });
   core.attachEndpoint("http://127.0.0.1:1/mcp");
@@ -122,4 +125,31 @@ test("per-engine defaults apply only when neither the environment nor the reques
     if (previous === undefined) delete process.env.PI_ORCHESTRATOR_CLAUDE_MODEL; else process.env.PI_ORCHESTRATOR_CLAUDE_MODEL = previous;
     await core.close();
   }
+});
+
+test("a transient failure of a read-only task is retried once, with usage summed; YOLO and parents of children are not", async () => {
+  const attempts: Record<string, number> = {};
+  let core!: Orchestrator;
+  const run = async (ctx: RuntimeContext) => {
+    attempts[ctx.prompt] = (attempts[ctx.prompt] ?? 0) + 1;
+    ctx.usage?.({ inputTokens: 100, cachedInputTokens: 0, outputTokens: 10, costUsd: 0.01 });
+    if (ctx.prompt === "parent" && attempts.parent === 1) core.delegate(ctx.task.id, "codex", "child-ok", "c");
+    if (ctx.prompt === "flaky" && (attempts.flaky ?? 0) > 1) return "recovered";
+    if (ctx.prompt === "child-ok") return "child";
+    throw new Error("Selected model is at capacity. Please try a different model.");
+  };
+  core = new Orchestrator({ cwd: process.cwd(), retryDelayMs: 10, maxConcurrent: 4, adapters: { codex: { capabilities, run } } });
+  core.attachEndpoint("http://127.0.0.1:1/mcp");
+  try {
+    const flaky = await core.wait(null, core.delegate(null, "codex", "flaky", "f").id);
+    assert.equal(flaky.state, "completed"); assert.equal(flaky.result, "recovered"); assert.equal(attempts.flaky, 2);
+    assert.deepEqual(flaky.usage, { inputTokens: 200, cachedInputTokens: 0, outputTokens: 20, costUsd: 0.02 }, "both attempts count");
+    const always = await core.wait(null, core.delegate(null, "codex", "always", "a").id);
+    assert.equal(always.state, "failed"); assert.equal(attempts.always, 2, "only one automatic retry");
+    assert.equal(always.diagnostic?.category, "transient");
+    const yolo = await core.wait(null, core.delegate(null, "codex", "yolo-flaky", "y", undefined, undefined, "yolo").id);
+    assert.equal(yolo.state, "failed"); assert.equal(attempts["yolo-flaky"], 1, "side effects could repeat: no retry");
+    const parent = await core.wait(null, core.delegate(null, "codex", "parent", "p").id);
+    assert.equal(parent.state, "failed"); assert.equal(attempts.parent, 1, "children would be duplicated: no retry");
+  } finally { await core.close(); }
 });

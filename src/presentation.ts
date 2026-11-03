@@ -193,6 +193,7 @@ export function friendlyError(error: string): string {
     [/Codex RPC timeout: (.+)/, "Codex no respondió a tiempo ($1)."],
     [/Claude error_max_turns|max.?turns/i, "Claude alcanzó su límite de turnos (PI_ORCHESTRATOR_CLAUDE_MAX_TURNS)."],
     [/Claude error_max_budget|max.?budget/i, "Claude alcanzó su presupuesto por tarea (--max-budget-usd)."],
+    [/at capacity|overloaded|temporarily unavailable/i, "El modelo del proveedor estaba saturado temporalmente."],
   ];
   const text = safeText(error);
   for (const [pattern, label] of rules) if (pattern.test(text)) return text.replace(new RegExp(`^[\\s\\S]*?${pattern.source}[\\s\\S]*$`, pattern.flags), label);
@@ -206,6 +207,7 @@ export function failureAdvice(task: TaskView): string {
     authentication: "Autentica este motor con su propia cuenta antes de volver a delegar.",
     network: "Comprueba la conexión y el estado de las subtareas antes de reintentar: podría duplicarse trabajo.",
     quota: "Comprueba la cuota de la cuenta o espera a que se restablezca. No se cambió de cuenta ni de modelo.",
+    transient: "El proveedor no estaba disponible temporalmente. Si era de solo lectura y sin subtareas ya se reintentó una vez; reinténtalo más tarde (R en el panel).",
     protocol: "Comprueba la compatibilidad de esta versión del motor; no relajes las validaciones.",
     cleanup: "El cierre no está confirmado. No reutilices esta sesión ni des por cancelados sus procesos.",
     unknown: "Consulta los detalles antes de iniciar otro intento. No hubo reintento automático.",
@@ -253,6 +255,8 @@ export function taskCardParts(task: TaskView, expanded = false, attention?: Atte
   ];
   if (!isTerminal(task) && task.lastActivity) head.push(`Última acción reportada por el motor: ${activityLabel(task.lastActivity)}`);
   const tail: string[] = [];
+  const changes = changesLine(task);
+  if (changes) tail.push(changes);
   if (task.state === "failed") tail.push(failureAdvice(task));
   if (expanded) {
     tail.push(`Tarea: ${task.id} · intento: ${task.attemptId}`, `Workspace: ${safeText(task.cwd)}`, `Sesión nativa: ${safeText(task.runtimeSessionId ?? "no registrada")}`);
@@ -321,6 +325,16 @@ export function formatInteractionDetail(detail: string): string {
   return lines.length ? lines.join("\n") : "El motor no envió detalles de la operación. Deniega si no puedes verificarla.";
 }
 
+/** One line about a YOLO task's isolated changes, or undefined. */
+export function changesLine(task: TaskView): string | undefined {
+  const changes = task.changes;
+  if (task.workspace === "in-place") return "Sin aislamiento: no es un repositorio git; los cambios se escribieron directamente.";
+  if (!changes) return task.workspace === "worktree" && !isTerminal(task) ? "Escribe en un worktree aislado; tu repositorio no se toca." : undefined;
+  if (changes.state === "none") return "Sin cambios en archivos.";
+  const size = `${changes.files} ${changes.files === 1 ? "archivo" : "archivos"} · +${changes.insertions} −${changes.deletions}`;
+  return { pending: `Cambios pendientes de revisión: ${size} · a aplicar · x descartar${changes.error ? ` · ${changes.error}` : ""}`, applied: `Cambios aplicados a tu repositorio: ${size}`, discarded: `Cambios descartados: ${size}` }[changes.state];
+}
+
 export function helpText(advanced: string): string {
   return [
     "Uso: /orch INSTRUCCIÓN en lenguaje natural",
@@ -329,14 +343,19 @@ export function helpText(advanced: string): string {
     "",
     "Panel: /orch (o /orch panel)",
     "  ↑↓ elegir · s redirigir · r reanudar · R reintentar · e editor · i insertar en el chat",
-    "  y copiar · c cancelar · d detalles · f filtro · PgUp/PgDn leer · Esc volver",
+    "  y copiar · a aplicar cambios · x descartar cambios · c cancelar · d detalles · f filtro",
+    "  PgUp/PgDn leer · Esc volver",
     "",
-    "Comandos: status · result ID · cancel ID · usage · engines · history · reset",
+    "YOLO en un repositorio git: la tarea escribe en un worktree aislado y con sandbox;",
+    "  tú revisas el diff y lo aplicas (a o /orch apply ID) o lo descartas (x o /orch discard ID).",
+    "",
+    "Comandos: status · result ID · cancel ID · apply ID · discard ID · usage · engines · history · reset",
     "Avanzado:",
     `  ${advanced.split(" | ").join("\n  ")}`,
     "",
     "Variables: PI_ORCHESTRATOR_TASK_TIMEOUT_MS · PI_ORCHESTRATOR_CODEX_DEFAULT_THINKING ·",
-    "  PI_ORCHESTRATOR_CLAUDE_MAX_TURNS · PI_ORCHESTRATOR_MAX_TASKS · PI_ORCHESTRATOR_NOTIFY (desktop|bell|off)",
+    "  PI_ORCHESTRATOR_CLAUDE_MAX_TURNS · PI_ORCHESTRATOR_MAX_TASKS · PI_ORCHESTRATOR_NOTIFY (desktop|bell|off) ·",
+    "  PI_ORCHESTRATOR_ALLOWED_ROOTS · PI_ORCHESTRATOR_YOLO_SANDBOX (on|off) · PI_ORCHESTRATOR_STATE_DIR (ruta|off)",
   ].join("\n");
 }
 

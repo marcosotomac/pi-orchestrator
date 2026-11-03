@@ -1,4 +1,4 @@
-import { capabilities, validatePermissionMode, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
+import { capabilities, validatePermissionMode, yoloSandbox, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
 import { RuntimeProcess } from "./process.ts";
 import { WORKER_CONTRACT } from "../worker-contract.ts";
 
@@ -165,7 +165,8 @@ export class CodexAdapter implements RuntimeAdapter {
       const disabled = await configuredMcpServers(request, context.task.cwd);
       const started = await request("thread/start", {
         cwd: context.task.cwd,
-        sandbox: yolo ? "danger-full-access" : "read-only",
+        // YOLO writes stay inside the task directory (its worktree) unless the operator opted out.
+        sandbox: yolo ? yoloSandbox() === "off" ? "danger-full-access" : "workspace-write" : "read-only",
         approvalPolicy: "never",
         ephemeral: true,
         ...(context.task.selection?.model ? { model: context.task.selection.model } : {}),

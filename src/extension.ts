@@ -49,7 +49,7 @@ async function copyText(text: string, tui: TerminalHandle | undefined): Promise<
   try { tui.terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`); return "OSC 52"; } catch { return undefined; }
 }
 
-const usage = "/orch [panel] | start codex|claude|antigravity PROMPT | run codex|claude|antigravity PROMPT | status | result ID | cancel ID | reset | demo | history | inspect RUN | reconcile RUN | restart RUN TASK --accept-duplicate-risk PROMPT | engines | usage | capabilities TASK | steer TASK TEXT | resume TASK TEXT";
+const usage = "/orch [panel] | start codex|claude|antigravity PROMPT | run codex|claude|antigravity PROMPT | status | result ID | cancel ID | apply ID | discard ID | reset | demo | history | inspect RUN | reconcile RUN | restart RUN TASK --accept-duplicate-risk PROMPT | engines | usage | capabilities TASK | steer TASK TEXT | resume TASK TEXT";
 const demoPrompt = "You must delegate exactly one task to the claude engine using the pi_orchestrator MCP delegate tool: compute 17 * 19 and explain in one sentence. Use requestKey 'arithmetic-review'. Wait for the task to complete with the MCP wait tool. Return its task id, status and answer. Do not solve it yourself or launch other workers.";
 
 /** Injection is only for local tests. Import/registration never opens sockets or starts processes. */
@@ -324,6 +324,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         thinking: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Per-task native thinking/effort: Codex reasoning effort; Claude effort (low, medium, high, xhigh, max); Antigravity thought_level. Use the requested level only; never silently downgrade." })),
         permissionMode: Type.Optional(Type.Union([Type.Literal("restricted"), Type.Literal("yolo")], { description: "Task-local permission policy. Use yolo only for explicit operator intent to run without tool approvals; interpret meaning, not a required phrase. Omit to retain restrictions. No global defaults or inherited authorization." })),
         requestKey: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+        cwd: Type.Optional(Type.String({ minLength: 1, maxLength: 4_096, description: "Directory to run in, only when the operator names another project or subdirectory. Must be inside Pi's cwd or PI_ORCHESTRATOR_ALLOWED_ROOTS. Omit to use Pi's cwd." })),
       }),
       async execute(callId, params, signal, _update, ctx) {
         signal?.throwIfAborted();
@@ -332,13 +333,13 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         if (params.permissionMode === "yolo") {
           if (ctx.mode !== "tui" || !ctx.hasUI) throw new Error("YOLO requires explicit human confirmation in the Pi TUI; the task was not started");
           const target = [params.engine, params.model, params.thinking].filter(Boolean).join(" · ");
-          const accepted = await ctx.ui.confirm("Autorizar YOLO para esta tarea", safeText(`${target}\n\nEjecutará comandos y modificará archivos SIN pedir aprobación. Confirma solo si tú lo pediste explícitamente.\n\nTarea:\n${params.prompt.slice(0, 800)}${params.prompt.length > 800 ? "…" : ""}`), { signal });
+          const accepted = await ctx.ui.confirm("Autorizar YOLO para esta tarea", safeText(`${target}\n\nEjecutará comandos y modificará archivos SIN pedir aprobación. En un repositorio git trabaja en un worktree aislado con sandbox (sin red): tú revisas el diff y decides si aplicarlo. Fuera de git escribe directamente. Confirma solo si tú lo pediste explícitamente.\n\nTarea:\n${params.prompt.slice(0, 800)}${params.prompt.length > 800 ? "…" : ""}`), { signal });
           signal?.throwIfAborted();
           if (!accepted) throw new Error("The operator did not confirm YOLO; the task was not started. Ask before retrying, or delegate without permissionMode.");
         }
         const { core } = await get(ctx);
         signal?.throwIfAborted();
-        const task = core.delegate(null, params.engine, params.prompt, params.requestKey ?? callId, undefined, { ...(params.model ? { model: params.model } : {}), ...(params.thinking ? { thinking: params.thinking } : {}) }, params.permissionMode);
+        const task = core.delegate(null, params.engine, params.prompt, params.requestKey ?? callId, undefined, { ...(params.model ? { model: params.model } : {}), ...(params.thinking ? { thinking: params.thinking } : {}) }, params.permissionMode, params.cwd);
         if (!toolTasks.has(task.id)) toolTasks.set(task.id, agentRun);
         latestContext = ctx;
         return reply(task, { ...once(task), next: deferred() ? NEXT_DEFERRED : NEXT_BLOCKING });
@@ -425,6 +426,19 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
             ctx.ui.notify("Reintento iniciado como una tarea nueva.", "info");
             return true;
           }
+          case "apply": {
+            const summary = task.changes ? `${task.changes.files} archivos · +${task.changes.insertions} −${task.changes.deletions}\n\n${task.changes.summary}` : "";
+            if (!await ctx.ui.confirm("Aplicar cambios a tu repositorio", safeText(`${task.engine} · ${task.title}\n\n${summary}\n\nSe aplicará el diff sobre tu árbol de trabajo (sin commit). Si hay conflictos no se escribe nada.`))) return true;
+            await core.applyChanges(null, task.id);
+            ctx.ui.notify("Cambios aplicados a tu árbol de trabajo (sin commit).", "info");
+            return true;
+          }
+          case "discard": {
+            if (!await ctx.ui.confirm("Descartar cambios", safeText(`${task.engine} · ${task.title}\n\nSe borrará el worktree y su diff. No se puede deshacer.`))) return true;
+            await core.discardChanges(null, task.id);
+            ctx.ui.notify("Cambios descartados.", "info");
+            return true;
+          }
           case "copy": {
             const how = await copyText(text, tuiRef);
             ctx.ui.notify(how ? `Resultado copiado (${how}).` : "No se pudo copiar: no hay portapapeles disponible.", how ? "info" : "warning");
@@ -450,7 +464,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         const instruction = args.trim();
         const [verb = "", argument, ...rest] = instruction.split(/\s+/);
         const administrative = /^(?:help|--help|engines|usage|reset|panel|history|status|demo)$/.test(instruction)
-          || /^(?:capabilities|result|cancel|inspect|reconcile)\s+[\w-]+$/.test(instruction)
+          || /^(?:capabilities|result|cancel|inspect|reconcile|apply|discard)\s+[\w-]+$/.test(instruction)
           || /^(?:steer|resume)\s+[a-fA-F0-9-]{6,}\s+\S/.test(instruction)
           || (verb === "restart" && Boolean(argument) && rest.length > 0);
         const legacyStart = ["start", "run"].includes(verb) && ["codex", "claude", "antigravity"].includes(argument ?? "");
@@ -468,6 +482,14 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         if (verb === "help" || verb === "--help") { message({ help: true }, "[Ayuda de /orch mostrada al operador]"); return; }
         if (verb === "engines") { message({ installation: detectAntigravity() }); return; }
         if (verb === "usage") { message({ report: usageReport(service ? (await service).core.usage() : undefined, tasks()) }, "[Uso del orquestador mostrado al operador]"); return; }
+        if (verb === "apply" || verb === "discard") {
+          if (!service) throw new Error("No hay un coordinador activo en esta sesión");
+          const { core } = await service;
+          const task = resolveTask(core.list(), argument!);
+          if (verb === "apply" && ctx.mode === "tui" && !await ctx.ui.confirm("Aplicar cambios a tu repositorio", safeText(`${task.engine} · ${task.title}\n\n${task.changes?.summary ?? ""}\n\nSe aplicará el diff sobre tu árbol de trabajo (sin commit).`))) return;
+          message(verb === "apply" ? await core.applyChanges(null, task.id) : await core.discardChanges(null, task.id));
+          return;
+        }
         if (verb === "resume" || verb === "steer" || verb === "capabilities") {
           if (!service) throw new Error("No hay un coordinador activo en esta sesión; los controles nunca adoptan intentos archivados");
           const { core } = await service;

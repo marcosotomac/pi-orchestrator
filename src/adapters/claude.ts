@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { capabilities, validatePermissionMode, RuntimeCleanupError, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
+import { capabilities, validatePermissionMode, yoloSandbox, RuntimeCleanupError, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
 import { RuntimeProcess } from "./process.ts";
 import { WORKER_CONTRACT } from "../worker-contract.ts";
 
@@ -31,7 +31,14 @@ export class ClaudeAdapter implements RuntimeAdapter {
 
   async run(context: RuntimeContext): Promise<string> {
     const yolo = validatePermissionMode(context.task.permissionMode) === "yolo";
-    const tools = yolo ? "Read,Glob,Grep,Bash,Write,Edit" : "Read,Glob,Grep";
+    // Restricted workers get Bash inside Claude Code's OS sandbox with the task directory
+    // write-denied (measured: reads/node run; writes to repo, $HOME, /tmp and network
+    // are blocked), so they can verify claims (tsc, tests) without modifying anything.
+    const sandboxed = !yolo || yoloSandbox() === "on";
+    const tools = yolo ? "Read,Glob,Grep,Bash,Write,Edit" : "Read,Glob,Grep,Bash";
+    const sandbox = sandboxed ? { sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
+      // No network from Bash, matching Codex's sandbox (measured: YOLO otherwise auto-approved outbound requests).
+      network: { allowedDomains: [], strictAllowlist: true }, ...(!yolo ? { filesystem: { denyWrite: [context.task.cwd] } } : {}) } } : {};
     const directory = await mkdtemp(join(tmpdir(), "pi-orchestrator-claude-"));
     let runtime: RuntimeProcess | undefined;
     try {
@@ -43,13 +50,15 @@ export class ClaudeAdapter implements RuntimeAdapter {
       } }), { mode: 0o600 });
       const args = [
         "--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
-        ...(!yolo ? ["--restricted"] : ["--dangerously-skip-permissions"]),
+        // --restricted would remove Bash entirely; the --tools allowlist plus the
+        // fail-closed OS sandbox (failIfUnavailable) bound restricted workers instead.
+        ...(yolo ? ["--dangerously-skip-permissions"] : []),
         "--tools", tools, "--allowedTools", `${tools},mcp__pi_orchestrator__*`,
         "--permission-mode", yolo ? "bypassPermissions" : "dontAsk", "--permission-prompts", "none",
         "--setting-sources", "", "--strict-mcp-config", "--mcp-config", configPath,
-        "--settings", JSON.stringify({ disableAllHooks: true, enabledPlugins: {}, autoMemoryEnabled: false }),
+        "--settings", JSON.stringify({ disableAllHooks: true, enabledPlugins: {}, autoMemoryEnabled: false, ...sandbox }),
         "--disable-slash-commands", "--no-chrome", "--max-turns", String(claudeLimit("PI_ORCHESTRATOR_CLAUDE_MAX_TURNS", 40, 1, 500)), "--max-budget-usd", claudeBudget(),
-        "--append-system-prompt", `${yolo ? "The operator authorized unattended tool execution for this task only. Follow the task scope; do not request tool approvals." : "You are a read-only worker supervised by Pi. Do not modify files."} Delegate only when explicitly required by your assigned task, using pi_orchestrator MCP tools, never native subagents. Wait for delegated results. Do not grant yourself or children additional permissions, ask the human directly, or expose credentials. Report child failures honestly. ${WORKER_CONTRACT}`,
+        "--append-system-prompt", `${yolo ? "The operator authorized unattended tool execution for this task only. Follow the task scope; do not request tool approvals." : "You are a read-only worker supervised by Pi. Do not modify files. Bash runs in a read-only sandbox: use it to verify (build, tests, inspection), not to write."} Delegate only when explicitly required by your assigned task, using pi_orchestrator MCP tools, never native subagents. Wait for delegated results. Do not grant yourself or children additional permissions, ask the human directly, or expose credentials. Report child failures honestly. ${WORKER_CONTRACT}`,
         ...(context.task.selection?.model ? ["--model", context.task.selection.model] : []),
         ...(context.task.selection?.thinking ? ["--effort", context.task.selection.thinking] : []),
       ];

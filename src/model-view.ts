@@ -27,6 +27,12 @@ export function modelTask(task: TaskView, policy: ResultPolicy): Record<string, 
     ...(usage ? { tokens: usage.inputTokens + usage.outputTokens, ...(usage.costUsd !== undefined ? { costUsd: Number(usage.costUsd.toFixed(4)) } : {}) } : {}),
     ...(task.error ? { error: safeText(task.error).slice(0, 2_000) } : {}),
     ...(task.diagnostic ? { recovery: task.diagnostic.recovery } : {}),
+    ...(task.workspace === "in-place" ? { workspace: "in-place (not a git repository: changes were written directly)" } : {}),
+    ...(task.changes && task.changes.state !== "none" ? { changes: {
+      state: task.changes.state, files: task.changes.files, insertions: task.changes.insertions, deletions: task.changes.deletions,
+      summary: safeText(task.changes.summary).slice(0, 1_500),
+      ...(task.changes.state === "pending" ? { note: "Cambios aislados en un worktree, NO están en el repo del operador. Solo el operador los aplica o descarta (/orch apply ID · /orch discard ID · teclas a/x del panel). Díselo; no afirmes que ya están aplicados." } : {}),
+    } } : {}),
     ...(task.result !== undefined ? { result: text(task.result, policy) } : {}),
     ...(task.partialResult !== undefined ? { partialResult: text(task.partialResult, policy) } : {}),
   };

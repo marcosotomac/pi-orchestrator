@@ -22,8 +22,10 @@ const taskSchema = z.object({
   permissionMode: z.enum(["restricted", "yolo"]).optional(),
   selection: z.object({ model: z.string().max(128).optional(), thinking: z.string().max(128).optional() }).strict().optional(),
   modelState: z.object({ model: z.string().max(128).optional(), thinking: z.string().max(128).optional(), availableModels: z.array(z.object({ id: z.string().max(128), name: z.string().max(160) }).strict()).max(128), availableThinking: z.array(z.string().max(128)).max(128) }).strict().optional(),
-  diagnostic: z.object({ category: z.enum(["authentication", "network", "quota", "protocol", "cleanup", "unknown"]), recovery: z.string().max(512), automaticRetry: z.literal(false) }).strict().optional(),
+  diagnostic: z.object({ category: z.enum(["authentication", "network", "quota", "transient", "protocol", "cleanup", "unknown"]), recovery: z.string().max(512), automaticRetry: z.boolean() }).strict().optional(),
   result: z.string().max(20_000).optional(), partialResult: z.string().max(20_000).optional(), error: z.string().max(8_000).optional(),
+  workspace: z.enum(["worktree", "in-place"]).optional(),
+  changes: z.object({ state: z.enum(["pending", "applied", "discarded", "none"]), files: z.number().int().nonnegative(), insertions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(), summary: z.string().max(4_000), repo: z.string().max(8_192).optional(), worktree: z.string().max(8_192).optional(), patchPath: z.string().max(8_192).optional(), base: z.string().max(64).optional(), error: z.string().max(500).optional() }).strict().optional(),
   usage: z.object({ inputTokens: z.number().int().nonnegative(), cachedInputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), reasoningTokens: z.number().int().nonnegative().optional(), costUsd: z.number().nonnegative().optional() }).strict().optional(),
 }).strict();
 const runSchema = z.object({
@@ -36,7 +38,7 @@ const runSchema = z.object({
   const previousTasks = new Map<string, z.infer<typeof taskSchema>>();
   for (const task of run.tasks) {
     const depth = task.parentId === null ? 1 : (seen.get(task.parentId) ?? -2) + 1;
-    if (seen.has(task.id) || attempts.has(task.attemptId) || task.depth !== depth || task.cwd !== run.cwd || isTerminal(task) !== Boolean(task.endedAt)) {
+    if (seen.has(task.id) || attempts.has(task.attemptId) || task.depth !== depth || !task.cwd.startsWith("/") || isTerminal(task) !== Boolean(task.endedAt)) {
       ctx.addIssue({ code: "custom", message: "Invalid task identity, tree, or lifecycle" });
     }
     if (task.continuation || task.continuationSource) {

@@ -37,7 +37,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
    else send({id:q.id,result:{data:[{name:'user-shell',runtimeStatus:mode==='mcp-leak'?'connected':'disabled'}]}});
  }
  if(q.method==='thread/start') {
-   require('node:assert/strict').equal(q.params.sandbox,mode==='yolo'?'danger-full-access':'read-only');
+   require('node:assert/strict').equal(q.params.sandbox,mode==='yolo'?'workspace-write':'read-only');
    require('node:assert/strict').equal(q.params.approvalPolicy,'never');
    require('node:assert/strict').equal(q.params.config['features.hooks'],false);
    if(mode==='yolo') require('node:assert/strict').ok(!q.params.developerInstructions.includes('Do not modify files'));

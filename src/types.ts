@@ -8,6 +8,17 @@ export function validatePermissionMode(value: unknown): PermissionMode {
   if (value === "yolo") return "yolo";
   throw new Error("Invalid permission mode");
 }
+/**
+ * Sandbox for YOLO tasks. Default "on": writes confined to the task directory
+ * (a worktree for git repos), no network. "off" restores full access and must
+ * be an explicit operator choice (PI_ORCHESTRATOR_YOLO_SANDBOX=off).
+ */
+export function yoloSandbox(env: NodeJS.ProcessEnv = process.env): "on" | "off" {
+  const value = env.PI_ORCHESTRATOR_YOLO_SANDBOX?.trim();
+  if (value === undefined || value === "" || value === "on") return "on";
+  if (value === "off") return "off";
+  throw new Error("Invalid PI_ORCHESTRATOR_YOLO_SANDBOX (expected on or off)");
+}
 export type TaskState = "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled";
 
 export interface RuntimeProcessInfo {
@@ -54,6 +65,9 @@ export interface TaskView {
   error?: string;
   diagnostic?: import("./diagnostics.ts").FailureDiagnostic;
   usage?: TaskUsage;
+  /** "worktree": a YOLO root isolated in a private checkout; "in-place": not a git repo. */
+  workspace?: "worktree" | "in-place";
+  changes?: import("./workspace.ts").TaskChanges;
 }
 
 export interface RuntimeControls { steer?: (text: string) => Promise<void> }

@@ -10,8 +10,9 @@ import type { OrchestratorOptions } from "./orchestrator.ts";
  * - 5 min dialogs: a permission must survive the operator being in another tab.
  * - Claude workers default to Sonnet: without --model the CLI uses the account
  *   default (measured: claude-opus-5-5). Opus stays one explicit request away.
+ * - YOLO roots run in a private git worktree; the operator applies or discards the diff.
  */
-export const productDefaults: Partial<OrchestratorOptions> = { queuePolicy: "fair", maxConcurrent: 4, interactionTimeoutMs: 300_000, defaultSelection: { claude: { model: "sonnet" } } };
+export const productDefaults: Partial<OrchestratorOptions> = { queuePolicy: "fair", maxConcurrent: 4, interactionTimeoutMs: 300_000, defaultSelection: { claude: { model: "sonnet" } }, isolateWrites: true };
 
 /** Read-only configuration parsing; no timers, files, ports or subprocesses. */
 export function runtimeConfiguration(env: NodeJS.ProcessEnv = process.env): Partial<OrchestratorOptions> {
@@ -22,6 +23,15 @@ export function runtimeConfiguration(env: NodeJS.ProcessEnv = process.env): Part
     if (value === undefined) continue;
     if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`Invalid orchestrator setting: ${name}`);
     options[field] = Number(value);
+  }
+  if (env.PI_ORCHESTRATOR_ALLOWED_ROOTS !== undefined) {
+    const roots = env.PI_ORCHESTRATOR_ALLOWED_ROOTS.split(":").map((root) => root.trim()).filter(Boolean);
+    if (roots.some((root) => !root.startsWith("/"))) throw new Error("PI_ORCHESTRATOR_ALLOWED_ROOTS must list absolute paths separated by ':'");
+    options.allowedRoots = roots;
+  }
+  if (env.PI_ORCHESTRATOR_ISOLATE_WRITES !== undefined) {
+    if (!["0", "1"].includes(env.PI_ORCHESTRATOR_ISOLATE_WRITES)) throw new Error("Invalid PI_ORCHESTRATOR_ISOLATE_WRITES (expected 0 or 1)");
+    options.isolateWrites = env.PI_ORCHESTRATOR_ISOLATE_WRITES === "1";
   }
   if (env.PI_ORCHESTRATOR_QUEUE !== undefined) {
     if (!["reject", "fair"].includes(env.PI_ORCHESTRATOR_QUEUE)) throw new Error("Invalid orchestrator queue policy");

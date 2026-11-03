@@ -11,17 +11,18 @@ test("RPC error categories preserve safe advice without leaking provider bodies"
   }
 });
 
-test("diagnostics distinguish actionable failures without publishing external text or retrying", () => {
+test("diagnostics distinguish actionable failures without publishing external text; only transient/network allow a retry", () => {
   for (const [error, category] of [
     [new Error("OAuth authentication failed PRIVATE"), "authentication"],
     [Object.assign(new Error("PRIVATE"), { code: "ECONNRESET" }), "network"],
     [new Error("quota exhausted PRIVATE"), "quota"],
+    [new Error("Selected model is at capacity. Please try a different model. PRIVATE"), "transient"],
     [new Error("Malformed JSON PRIVATE"), "protocol"],
     [new RuntimeCleanupError(new Error("PRIVATE")), "cleanup"],
     [undefined, "unknown"], [new Error("PRIVATE"), "unknown"],
   ] as const) {
     const diagnostic = diagnoseFailure(error);
-    assert.equal(diagnostic.category, category); assert.equal(diagnostic.automaticRetry, false);
+    assert.equal(diagnostic.category, category); assert.equal(diagnostic.automaticRetry, category === "network" || category === "transient");
     assert.ok(!JSON.stringify(diagnostic).includes("PRIVATE"));
   }
 });

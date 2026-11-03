@@ -279,6 +279,19 @@ Sin variables se conservan los modelos predeterminados de cada runtime. Codex re
 - `npm run verify`: compilador, batería completa y arnés PTY con Pi real (sin cuota).
 - `npm run verify:live`: lo anterior más `scripts/live-matrix.ts`, que ejecuta los tres motores solos y anidados en paralelo (consume cuota; sale con código 1 si un caso falla).
 
+## Escritura aislada (YOLO) y sandbox
+
+- Una tarea raíz YOLO en un repositorio git corre en un **worktree privado**, creado desde una instantánea de tu estado: el último commit más los cambios staged y unstaged, mediante `git stash create`. Los archivos sin seguimiento no se incluyen. Sus subtareas ven ese mismo worktree.
+- Al terminar, con éxito o no, se registra el diff (`git diff --stat` y un parche privado) y **no se aplica**. Tú decides: `a` o `/orch apply ID` lo aplica sobre tu árbol de trabajo (sin commit; si hay conflicto no se escribe nada y el worktree se conserva), y `x` o `/orch discard ID` lo descarta. Si no hubo cambios, el worktree se borra solo.
+- Fuera de git, la tarea escribe directamente y la tarjeta lo dice. `PI_ORCHESTRATOR_ISOLATE_WRITES=0` desactiva el aislamiento.
+- Sandbox (`PI_ORCHESTRATOR_YOLO_SANDBOX=on` por defecto):
+  - Codex YOLO usa `workspace-write`: solo escribe en su directorio y no tiene red.
+  - Claude ejecuta Bash dentro del sandbox de Claude Code, con `failIfUnavailable`, sin salida del sandbox y sin red. En modo restringido además tiene el directorio de la tarea protegido contra escritura: puede ejecutar `tsc` o tests, pero no escribir.
+  - Medido en vivo: Codex y Claude YOLO arreglaron un error en su worktree, tu árbol quedó intacto hasta aplicar, y la escritura en `$HOME` y la red quedaron bloqueadas.
+  - `off` restaura el acceso total. Que sea una elección explícita tuya.
+- `cwd` por tarea: el modelo puede indicarlo cuando nombras otro proyecto. Debe estar dentro del `cwd` de Pi o de `PI_ORCHESTRATOR_ALLOWED_ROOTS` (rutas absolutas separadas por `:`). Las subtareas heredan el directorio del padre.
+- Reintento automático: un fallo transitorio del proveedor (capacidad, sobrecarga, 5xx) o de red se reintenta **una vez** tras 5 s, solo si la tarea es de solo lectura, no lanzó subtareas y no fue cancelada. Los tokens de los dos intentos se suman. Medido: Codex devolvió `Selected model is at capacity` en una ejecución real de la matriz.
+
 ## Historial por defecto
 
 La extensión guarda el historial en `~/.pi/agent/orchestrator-state` (directorio 0700, archivos 0600). `PI_ORCHESTRATOR_STATE_DIR` elige otro directorio y `PI_ORCHESTRATOR_STATE_DIR=off` lo desactiva. Retención: se conservan los 100 runs más recientes; solo se borran runs más antiguos con cierre registrado y archivo válido (nunca runs sin cierre, que podrían seguir vivos, ni archivos inválidos). La actividad se escribe en disco como mucho cada 5 s por tarea (medido en una tarea real de Codex: 18 → 11 escrituras); el cierre de cada tarea siempre se escribe.

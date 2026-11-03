@@ -209,7 +209,8 @@ test("malformed, foreign, cyclic and unsafe archives fail closed; one corrupt ru
       (run) => ({ ...run, runId: randomUUID() }),
       (run) => ({ ...run, closedAt: new Date().toISOString() }),
       (run) => ({ ...run, tasks: [{ ...run.tasks[0]!, parentId: run.tasks[0]!.id }] }),
-      (run) => ({ ...run, tasks: [{ ...run.tasks[0]!, cwd: "/foreign" }] }),
+      // Tasks may run outside the run cwd (per-task cwd, YOLO worktrees), but only at absolute paths.
+      (run) => ({ ...run, tasks: [{ ...run.tasks[0]!, cwd: "relative/escape" }] }),
       (run) => ({ ...run, tasks: [run.tasks[0]!, run.tasks[0]!] }),
       (run) => ({ ...run, tasks: [{ ...run.tasks[0]!, state: "completed" }] }),
     ];

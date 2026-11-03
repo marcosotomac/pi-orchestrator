@@ -1,10 +1,10 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, SelectList, Text, truncateToWidth, type Component, type KeybindingsManager } from "@earendil-works/pi-tui";
-import { elapsed, safeText, subtree, summary, urgentRows, taskRow, modelLabel, taskPhase, taskDetail, stateIcon, failureAdvice, friendlyError, formatTokens, activityLabel, isStalled, type Attention } from "./presentation.ts";
+import { changesLine, elapsed, safeText, subtree, summary, urgentRows, taskRow, modelLabel, taskPhase, taskDetail, stateIcon, failureAdvice, friendlyError, formatTokens, activityLabel, isStalled, type Attention } from "./presentation.ts";
 import { isTerminal, type TaskView } from "./types.ts";
 
 /** Actions that need Pi dialogs, the editor or the chat run after the panel closes. */
-export type PanelAction = { kind: "steer" | "resume" | "retry" | "editor" | "insert" | "copy"; taskId: string };
+export type PanelAction = { kind: "steer" | "resume" | "retry" | "editor" | "insert" | "copy" | "apply" | "discard"; taskId: string };
 export interface PanelControls { steer: boolean; resume: boolean; retry: boolean }
 
 export interface DashboardOptions {
@@ -113,6 +113,8 @@ export class TaskDashboard implements Component {
         modelLabel(task),
         ...(detail.text && !detail.text.startsWith("motor:") ? [detail.text] : []),
         ...(!isTerminal(task) && task.lastActivity ? [`Última acción reportada por el motor: ${activityLabel(task.lastActivity)}`] : []),
+        ...(changesLine(task) ? [changesLine(task)!] : []),
+        ...(task.changes?.state === "pending" && task.changes.summary ? [task.changes.summary] : []),
         ...(this.details ? ["", `Tarea: ${task.id}`, `Intento: ${task.attemptId}`, `Workspace: ${task.cwd}`,
           `Sesión nativa: ${task.runtimeSessionId ?? "no registrada"}`,
           `Proceso: ${process ? `${process.pid} · ${process.exitedAt ? "salida observada" : "salida aún no observada"}` : "no registrado"}`,
@@ -140,6 +142,7 @@ export class TaskDashboard implements Component {
     const text = task ? Boolean(task.result ?? task.error) : false;
     const actions = [
       ...(controls.steer ? ["s redirigir"] : []), ...(controls.resume ? ["r reanudar"] : []), ...(controls.retry ? ["R reintentar"] : []),
+      ...(task?.changes?.state === "pending" && isTerminal(task) ? ["a aplicar cambios", "x descartar cambios"] : []),
       ...(text ? ["e editor", "i insertar en el chat", "y copiar"] : []),
       ...(task && !isTerminal(task) ? ["c cancelar árbol"] : []),
     ];
@@ -174,10 +177,11 @@ export class TaskDashboard implements Component {
     const task = this.options.tasks().find((entry) => entry.id === this.selectedId);
     const controls = this.controlsFor(task);
     const hasText = Boolean(task?.result ?? task?.error);
-    const action = ({ s: controls.steer && "steer", r: controls.resume && "resume", R: controls.retry && "retry", e: hasText && "editor", i: hasText && "insert", y: hasText && "copy" } as Record<string, string | false>)[data];
+    const pending = Boolean(task && isTerminal(task) && task.changes?.state === "pending");
+    const action = ({ s: controls.steer && "steer", r: controls.resume && "resume", R: controls.retry && "retry", e: hasText && "editor", i: hasText && "insert", y: hasText && "copy", a: pending && "apply", x: pending && "discard" } as Record<string, string | false>)[data];
     if (task && action) { this.finish({ kind: action as PanelAction["kind"], taskId: task.id }); return; }
-    if (task && ["s", "r", "R", "e", "i", "y"].includes(data)) {
-      this.notice = { s: "Redirigir solo está disponible en tareas de Codex en curso.", r: "Reanudar solo está disponible en sesiones de Antigravity completadas.", R: "Solo se reintentan tareas raíz ya terminadas.", e: "Esta tarea aún no tiene resultado.", i: "Esta tarea aún no tiene resultado.", y: "Esta tarea aún no tiene resultado." }[data as "s"]!;
+    if (task && ["s", "r", "R", "e", "i", "y", "a", "x"].includes(data)) {
+      this.notice = { s: "Redirigir solo está disponible en tareas de Codex en curso.", r: "Reanudar solo está disponible en sesiones completadas que lo admiten.", R: "Solo se reintentan tareas raíz ya terminadas.", e: "Esta tarea aún no tiene resultado.", i: "Esta tarea aún no tiene resultado.", y: "Esta tarea aún no tiene resultado.", a: "Esta tarea no tiene cambios pendientes.", x: "Esta tarea no tiene cambios pendientes." }[data as "s"]!;
     } else if (data === "d") { this.details = !this.details; this.offset = 0; }
     else if (data === "f") {
       this.filter = this.filter === "all" ? "active" : this.filter === "active" ? "failed" : "all";

@@ -172,3 +172,22 @@ test("widget collapses when idle, alerts reach the terminal, and operator screen
     assert.match(screens[1].details.report, /Tareas: 1\/32/);
   } finally { await service?.close(); }
 });
+
+test("pending changes show in the panel with apply/discard keys, and the model is told they are not applied", async () => {
+  const { modelTask } = await import("../src/model-view.ts");
+  const { changesLine } = await import("../src/presentation.ts");
+  const changes = { state: "pending" as const, files: 2, insertions: 10, deletions: 3, summary: " src/a.ts | 9 ++++++---\n src/b.ts | 4 ++++", repo: "/r", worktree: "/w", patchPath: "/p/changes.patch" };
+  const done = task("yolo", { state: "completed", endedAt: at(1), result: "hecho", permissionMode: "yolo", workspace: "worktree", changes });
+  const view = panel([done], { steer: false, resume: false, retry: true });
+  const screen = view.view.render(120).join("\n");
+  assert.match(screen, /Cambios pendientes de revisión: 2 archivos · \+10 −3/);
+  assert.match(screen, /a aplicar cambios · x descartar cambios/);
+  view.view.handleInput("a");
+  assert.deepEqual(view.actions, [{ kind: "apply", taskId: "yolo" }]);
+  const other = panel([{ ...done, changes: { ...changes, state: "applied" as const } }]);
+  other.view.handleInput("x");
+  assert.deepEqual(other.actions, [], "nothing pending: no discard");
+  const model = modelTask(done, "include") as any;
+  assert.equal(model.changes.files, 2); assert.match(model.changes.note, /NO están en el repo/);
+  assert.equal(changesLine(task("p", { workspace: "in-place", state: "completed" })), "Sin aislamiento: no es un repositorio git; los cambios se escribieron directamente.");
+});
