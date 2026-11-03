@@ -100,6 +100,14 @@ export interface RuntimeAdapter {
     interactivePermissions?: boolean;
   };
   run(context: RuntimeContext): Promise<string>;
+  /** Real models and thinking levels this runtime offers now (no prompt is sent). */
+  catalog?(cwd: string, signal: AbortSignal): Promise<EngineCatalog>;
+}
+
+export interface EngineCatalog {
+  models: { id: string; name?: string; efforts?: string[]; default?: boolean }[];
+  thinking?: string[];
+  note?: string;
 }
 
 export const capabilities: RuntimeAdapter["capabilities"] = {

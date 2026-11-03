@@ -2,7 +2,7 @@ import { accessSync, constants } from "node:fs";
 import { isAbsolute } from "node:path";
 import { selectAcpModel } from "../model-selection.ts";
 import { runtimeRequestError } from "../diagnostics.ts";
-import { capabilities, validatePermissionMode, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
+import { capabilities, validatePermissionMode, type EngineCatalog, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
 import { RuntimeProcess } from "./process.ts";
 import { antigravityEnvironment } from "../antigravity-profile.ts";
 import { detectAntigravity } from "../antigravity-installation.ts";
@@ -15,6 +15,43 @@ export class AntigravityAdapter implements RuntimeAdapter {
   constructor(private readonly executable = detectAntigravity().executable,
     private readonly enabled = detectAntigravity().enabled,
     private readonly environment: (executable: string) => NodeJS.ProcessEnv = antigravityEnvironment) {}
+
+  /** Opens a session without a prompt to read the real model and thought-level lists. */
+  async catalog(cwd: string, signal: AbortSignal): Promise<EngineCatalog> {
+    if (!this.enabled || !this.executable || !isAbsolute(this.executable)) throw new Error("Antigravity ACP is not configured");
+    const runtime = new RuntimeProcess(this.executable, process.platform === "linux" ? ["--uid="] : [], cwd, signal, undefined, this.environment(this.executable));
+    const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
+    let failure: Error | undefined, id = 0;
+    runtime.onFailure = (error) => { failure = error; for (const waiter of pending.values()) waiter.reject(error); pending.clear(); };
+    runtime.onMessage = (message) => {
+      if (message.method) {
+        // Never grant anything while probing: requests are refused, notifications ignored.
+        if (message.id !== undefined) runtime.send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Unsupported while listing models" } });
+        return;
+      }
+      const waiter = pending.get(message.id);
+      if (!waiter) return;
+      pending.delete(message.id);
+      if (message.error) waiter.reject(runtimeRequestError(message.error)); else waiter.resolve(message.result);
+    };
+    const request = (method: string, params: unknown) => new Promise<any>((resolve, reject) => {
+      if (failure) { reject(failure); return; }
+      const key = ++id;
+      const timer = setTimeout(() => { pending.delete(key); reject(new Error(`Antigravity ACP timeout: ${method}`)); }, 30_000);
+      pending.set(key, { resolve: (value) => { clearTimeout(timer); resolve(value); }, reject: (error) => { clearTimeout(timer); reject(error); } });
+      runtime.send({ jsonrpc: "2.0", id: key, method, params });
+    });
+    try {
+      const initialized = await request("initialize", { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: "pi-orchestrator", version: "0.1.0" } });
+      if (initialized?.protocolVersion !== 1 || initialized.agentInfo?.name !== "antigravity-acp") throw new Error("Antigravity ACP identity or protocol unavailable");
+      await request("authenticate", { methodId: "oauth-personal" });
+      const session = await request("session/new", { cwd, _meta: { antigravity: { disabledTools: ["run_workflow"] } }, mcpServers: [] });
+      if (typeof session?.sessionId !== "string") throw new Error("Antigravity ACP returned no session");
+      const state = await selectAcpModel(session, {}, request, session.sessionId);
+      return { models: state.availableModels.map((model) => ({ id: model.id, name: model.name, ...(model.id === state.model ? { default: true } : {}) })), thinking: state.availableThinking,
+        note: "thinking sets Antigravity's thought_level; the session default model is marked." };
+    } finally { await runtime.stop(); }
+  }
 
   async run(ctx: RuntimeContext): Promise<string> {
     const yolo = validatePermissionMode(ctx.task.permissionMode) === "yolo";

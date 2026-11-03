@@ -359,12 +359,14 @@ export function helpText(advanced: string): string {
   ].join("\n");
 }
 
-export function usageReport(usage: { runtimeMs: number; maxRuntimeMs?: number; activeSlots: number; tasks: number; queued: number; maxTasks: number; maxConcurrent: number } | undefined, tasks: TaskView[]): string {
+export function usageReport(usage: { runtimeMs: number; maxRuntimeMs?: number; activeSlots: number; tasks: number; queued: number; maxTasks: number; maxConcurrent: number; maxTokens?: number; maxCostUsd?: number; spend?: { tokens: number; costUsd: number } } | undefined, tasks: TaskView[]): string {
   const lines = ["Uso del orquestador"];
   if (!usage) lines.push("Aún no se ha iniciado ninguna tarea en esta sesión.");
   else {
     lines.push(`Tareas: ${usage.tasks}/${usage.maxTasks} · simultáneas ${usage.activeSlots}/${usage.maxConcurrent}${usage.queued ? ` · ${usage.queued} en cola` : ""}`);
     lines.push(`Tiempo de ejecución acumulado: ${short(usage.runtimeMs)}${usage.maxRuntimeMs ? ` de ${short(usage.maxRuntimeMs)}` : ""}`);
+    if (usage.maxTokens !== undefined && usage.spend) lines.push(`Tope de tokens: ${usage.spend.tokens.toLocaleString("es")} de ${usage.maxTokens.toLocaleString("es")} (PI_ORCHESTRATOR_MAX_TOKENS)`);
+    if (usage.maxCostUsd !== undefined && usage.spend) lines.push(`Tope de coste: $${usage.spend.costUsd.toFixed(2)} de $${usage.maxCostUsd.toFixed(2)} (solo Claude informa dólares; PI_ORCHESTRATOR_MAX_COST_USD)`);
   }
   const reported = tasks.filter((task) => task.usage);
   if (reported.length) {

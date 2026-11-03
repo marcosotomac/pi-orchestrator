@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve as resolvePath, sep } from "node:path";
-import type { Engine, RecoverySource, RuntimeAdapter, RuntimeControls, TaskUsage, TaskView } from "./types.ts";
+import type { Engine, EngineCatalog, RecoverySource, RuntimeAdapter, RuntimeControls, TaskUsage, TaskView } from "./types.ts";
 import { FairQueue } from "./fair-queue.ts";
 import { RuntimeBudget } from "./budget.ts";
 import { InteractionBroker, type InteractionHandler } from "./interactions.ts";
@@ -79,6 +79,9 @@ export interface OrchestratorOptions {
   defaultSelection?: Partial<Record<Engine, ModelSelection>>;
   /** YOLO roots run in a private git worktree; their diff waits for the operator. */
   isolateWrites?: boolean;
+  /** Spend guards over provider-reported usage: once reached, new work is refused (running work continues). */
+  maxCostUsd?: number;
+  maxTokens?: number;
   /** Delay before the single automatic retry of a transient/network failure. */
   retryDelayMs?: number;
   /** Extra directories (besides cwd) an operator task may run in; subdirectories included. */
@@ -215,6 +218,7 @@ export class Orchestrator {
         ![recoverySource.runId, recoverySource.taskId, recoverySource.attemptId].every((id) => typeof id === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(id)))) throw new Error("Invalid recovery source");
     if (this.persistenceFailure) throw this.persistenceFailure;
     this.budget.assertAvailable();
+    this.assertSpendAvailable();
     if (this.closing) throw new Error("Orchestrator is shutting down");
     if (!this.endpoint) throw new Error("MCP bridge is not listening");
     if (!Object.hasOwn(this.options.adapters, engine) || !this.options.adapters[engine]) throw new Error("Unsupported engine");
@@ -543,8 +547,42 @@ export class Orchestrator {
     } finally { entry.steering = false; }
   }
 
+  /** Provider-reported spend so far: tokens from every engine, dollars only where reported (Claude). */
+  spend(): { tokens: number; costUsd: number; costEngines: string[] } {
+    let tokens = 0, costUsd = 0;
+    const costEngines = new Set<string>();
+    for (const { view } of this.entries.values()) {
+      if (!view.usage) continue;
+      tokens += view.usage.inputTokens + view.usage.outputTokens;
+      if (view.usage.costUsd !== undefined) { costUsd += view.usage.costUsd; costEngines.add(view.engine); }
+    }
+    return { tokens, costUsd, costEngines: [...costEngines] };
+  }
+
+  private assertSpendAvailable(): void {
+    const { tokens, costUsd } = this.spend();
+    if (this.options.maxTokens !== undefined && tokens >= this.options.maxTokens) throw new Error(`Session token limit reached (${tokens} ≥ ${this.options.maxTokens}, PI_ORCHESTRATOR_MAX_TOKENS); new work is refused`);
+    if (this.options.maxCostUsd !== undefined && costUsd >= this.options.maxCostUsd) throw new Error(`Session cost limit reached ($${costUsd.toFixed(2)} ≥ $${this.options.maxCostUsd}, PI_ORCHESTRATOR_MAX_COST_USD); new work is refused`);
+  }
+
+  /** Real model listings, one short-lived probe per engine (never a prompt); failures are reported per engine. */
+  async catalog(signal?: AbortSignal): Promise<Record<string, EngineCatalog | { error: string }>> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("Catalog probe deadline")), 60_000);
+    const abort = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      const entries = await Promise.all(Object.entries(this.options.adapters).map(async ([engine, adapter]) => {
+        if (!adapter?.catalog) return [engine, { error: "listing unsupported" }] as const;
+        try { return [engine, await adapter.catalog(this.cwd, controller.signal)] as const; }
+        catch (error) { return [engine, { error: errorText(error).slice(0, 300) }] as const; }
+      }));
+      return Object.fromEntries(entries);
+    } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
+  }
+
   usage() {
-    return { ...this.budget.view(), tasks: this.entries.size, queued: this.queue.size, maxTasks: this.limits.maxTasks, maxConcurrent: this.limits.maxConcurrent, rootSlots: this.options.queuePolicy === "fair" ? this.rootSlots : this.limits.maxConcurrent };
+    return { ...this.budget.view(), spend: this.spend(), maxCostUsd: this.options.maxCostUsd, maxTokens: this.options.maxTokens, tasks: this.entries.size, queued: this.queue.size, maxTasks: this.limits.maxTasks, maxConcurrent: this.limits.maxConcurrent, rootSlots: this.options.queuePolicy === "fair" ? this.rootSlots : this.limits.maxConcurrent };
   }
 
   private pump(): void {

@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { capabilities, validatePermissionMode, yoloSandbox, RuntimeCleanupError, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
+import { capabilities, validatePermissionMode, yoloSandbox, RuntimeCleanupError, type EngineCatalog, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
 import { RuntimeProcess } from "./process.ts";
 import { WORKER_CONTRACT } from "../worker-contract.ts";
 
@@ -28,6 +28,12 @@ export class ClaudeAdapter implements RuntimeAdapter {
   capabilities = capabilities;
 
   constructor(private readonly executable = "claude") {}
+
+  /** The CLI has no model listing: its documented aliases, resolved per task (see modelState). */
+  async catalog(): Promise<EngineCatalog> {
+    return { models: [{ id: "haiku", name: "Claude Haiku (alias)" }, { id: "sonnet", name: "Claude Sonnet (alias)", default: true }, { id: "opus", name: "Claude Opus (alias)" }],
+      thinking: ["low", "medium", "high", "xhigh", "max"], note: "Aliases resolve to the account's current models; the resolved model is recorded per task. Default here: sonnet." };
+  }
 
   async run(context: RuntimeContext): Promise<string> {
     const yolo = validatePermissionMode(context.task.permissionMode) === "yolo";

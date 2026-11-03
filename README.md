@@ -296,6 +296,15 @@ Sin variables se conservan los modelos predeterminados de cada runtime. Codex re
 
 `orchestrator_continue` (y `r` en el panel) envía un seguimiento a la **misma sesión nativa** de una tarea completada: los hilos de Codex (`thread/resume`; ya no son efímeros) y las sesiones de Antigravity. Se ofrece cuando el resultado lleva `continuable: true`, nunca para YOLO. Medido con la misma pregunta de seguimiento sobre Codex: 18 309 tokens de entrada (261 sin caché) frente a 36 149 (18 357 sin caché) de una tarea nueva, 6 s frente a 8 s, y la misma respuesta correcta. En un hilo reanudado Codex informa totales acumulados del hilo: cada continuación registra solo su parte. En una prueba real de extremo a extremo, el modelo principal eligió `orchestrator_continue` por sí mismo para el seguimiento.
 
+## Catálogo de modelos y topes de gasto
+
+- `orchestrator_engines` lista lo que cada motor ofrece de verdad, sin enviar ningún prompt, y lo cachea 15 min:
+  - Codex con `model/list`.
+  - Antigravity abre una sesión breve para leer su catálogo.
+  - Claude muestra sus alias, que se resuelven por cuenta; el modelo resuelto queda registrado en cada tarea.
+  - Medido: los tres motores responden en 4,3 s. En una prueba real, el modelo principal resolvió "argon" como `gemini-4-argon` consultando el catálogo, en lugar de adivinar.
+- `PI_ORCHESTRATOR_MAX_TOKENS` y `PI_ORCHESTRATOR_MAX_COST_USD` limitan el gasto de la sesión según lo que informa cada motor (solo Claude informa dólares). Al alcanzarse se rechaza trabajo nuevo, pero no se mata el que está en curso. `/orch usage` muestra el consumo frente al tope.
+
 ## Historial por defecto
 
 La extensión guarda el historial en `~/.pi/agent/orchestrator-state` (directorio 0700, archivos 0600). `PI_ORCHESTRATOR_STATE_DIR` elige otro directorio y `PI_ORCHESTRATOR_STATE_DIR=off` lo desactiva. Retención: se conservan los 100 runs más recientes; solo se borran runs más antiguos con cierre registrado y archivo válido (nunca runs sin cierre, que podrían seguir vivos, ni archivos inválidos). La actividad se escribe en disco como mucho cada 5 s por tarea (medido en una tarea real de Codex: 18 → 11 escrituras); el cierre de cada tarea siempre se escribe.

@@ -29,6 +29,7 @@ for (let run = 1; run <= Number(runsArg ?? 1); run++) {
   const tick = setInterval(() => { const now = Date.now(); if (session.isStreaming) blockedMs += now - last; last = now; }, 100);
   const prompt = scenario === "fanout"
     ? "/orch Analiza este repo con tres tareas en paralelo: (1) claude: qué función devuelve NaN con un array vacío; (2) codex: si algún secreto o token se escribe en logs; (3) claude: si median es correcta para arrays de longitud par. Al final dame un resumen con archivo:línea de cada hallazgo."
+    : scenario === "catalog" ? "/orch usa antigravity con el modelo argon y thinking low para leer notes.txt y decirme el valor de MARKER."
     : "¿Qué valor tiene MARKER en notes.txt?";
   let firstReturn = 0;
   const settleAll = async () => {
@@ -72,7 +73,7 @@ for (let run = 1; run <= Number(runsArg ?? 1); run++) {
   const final = assistants.map((m) => m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("")).join("\n---\n");
   const lastText = assistants.at(-1)?.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") ?? "";
   const emptyTurns = assistants.filter((m) => /ya (est[aá]|fue) (incluido|entregado)|already (included|delivered)|Resultado ya incluido/i.test(m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join(""))).length;
-  const checks = scenario === "followup" ? { nan: /average/.test(final) && /math\.ts:?\s*(L)?[67]\b/.test(final), usedContinue: phaseTools.includes("orchestrator_continue") } : scenario === "fanout"
+  const checks = scenario === "catalog" ? { listed: toolCalls.includes("orchestrator_engines"), model: tasks.some((t) => t.modelState?.model === "gemini-4-argon" || t.selection?.model === "gemini-4-argon"), marker: /violeta-42/.test(final) } : scenario === "followup" ? { nan: /average/.test(final) && /math\.ts:?\s*(L)?[67]\b/.test(final), usedContinue: phaseTools.includes("orchestrator_continue") } : scenario === "fanout"
     ? { nan: /average/.test(final) && /math\.ts:?\s*(L)?[67]\b/.test(final), secret: /auth\.ts:?\s*(L)?5\b/.test(final), median: /median/.test(final) && /math\.ts:?\s*(L)?1[0-2]\b/.test(final) }
     : { marker: /violeta-42/.test(final) };
   const evidence = tasks.filter((t) => /\b[\w/.-]+\.ts:\d+/.test(t.result ?? "")).length;

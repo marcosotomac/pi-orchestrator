@@ -24,6 +24,15 @@ export function runtimeConfiguration(env: NodeJS.ProcessEnv = process.env): Part
     if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`Invalid orchestrator setting: ${name}`);
     options[field] = Number(value);
   }
+  if (env.PI_ORCHESTRATOR_MAX_TOKENS !== undefined) {
+    if (!/^\d+$/.test(env.PI_ORCHESTRATOR_MAX_TOKENS) || Number(env.PI_ORCHESTRATOR_MAX_TOKENS) < 1) throw new Error("Invalid orchestrator setting: PI_ORCHESTRATOR_MAX_TOKENS");
+    options.maxTokens = Number(env.PI_ORCHESTRATOR_MAX_TOKENS);
+  }
+  if (env.PI_ORCHESTRATOR_MAX_COST_USD !== undefined) {
+    const value = Number(env.PI_ORCHESTRATOR_MAX_COST_USD);
+    if (!/^\d+(?:\.\d{1,2})?$/.test(env.PI_ORCHESTRATOR_MAX_COST_USD) || !(value > 0)) throw new Error("Invalid orchestrator setting: PI_ORCHESTRATOR_MAX_COST_USD");
+    options.maxCostUsd = value;
+  }
   if (env.PI_ORCHESTRATOR_ALLOWED_ROOTS !== undefined) {
     const roots = env.PI_ORCHESTRATOR_ALLOWED_ROOTS.split(":").map((root) => root.trim()).filter(Boolean);
     if (roots.some((root) => !root.startsWith("/"))) throw new Error("PI_ORCHESTRATOR_ALLOWED_ROOTS must list absolute paths separated by ':'");

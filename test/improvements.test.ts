@@ -174,3 +174,27 @@ test("a continuation counts only its own share of a resumed thread's cumulative 
     assert.equal(core.controls(null, yolo.id).resumeReady, false, "YOLO sessions are never offered as continuable");
   } finally { await core.close(); }
 });
+
+test("spend guards refuse new work once reached, never kill running work, and are parsed strictly", async () => {
+  assert.deepEqual(runtimeConfiguration({ PI_ORCHESTRATOR_MAX_TOKENS: "1000", PI_ORCHESTRATOR_MAX_COST_USD: "2.50" }), { maxTokens: 1000, maxCostUsd: 2.5 });
+  for (const bad of [{ PI_ORCHESTRATOR_MAX_TOKENS: "1e3" }, { PI_ORCHESTRATOR_MAX_COST_USD: "-1" }, { PI_ORCHESTRATOR_MAX_COST_USD: "abc" }]) assert.throws(() => runtimeConfiguration(bad), /Invalid/);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const run = async (ctx: RuntimeContext) => { ctx.usage?.({ inputTokens: 900, cachedInputTokens: 0, outputTokens: 200, costUsd: 0.6 }); if (ctx.prompt === "long") await gate; return "ok"; };
+  const core = new Orchestrator({ cwd: process.cwd(), maxTokens: 1000, maxConcurrent: 4, adapters: { claude: { capabilities, run } } });
+  core.attachEndpoint("http://127.0.0.1:1/mcp");
+  try {
+    const long = core.delegate(null, "claude", "long", "l");
+    while (!core.status(null, long.id).usage) await delay(1);
+    assert.throws(() => core.delegate(null, "claude", "more", "m"), /Session token limit reached \(1100 ≥ 1000/);
+    release();
+    assert.equal((await core.wait(null, long.id)).state, "completed", "running work is never killed by the guard");
+    assert.deepEqual(core.usage().spend, { tokens: 1100, costUsd: 0.6, costEngines: ["claude"] });
+  } finally { await core.close(); }
+  const priced = new Orchestrator({ cwd: process.cwd(), maxCostUsd: 0.5, adapters: { claude: { capabilities, run } } });
+  priced.attachEndpoint("http://127.0.0.1:1/mcp");
+  try {
+    await priced.wait(null, priced.delegate(null, "claude", "a", "a").id);
+    assert.throws(() => priced.delegate(null, "claude", "b", "b"), /Session cost limit reached \(\$0\.60/);
+  } finally { await priced.close(); }
+});

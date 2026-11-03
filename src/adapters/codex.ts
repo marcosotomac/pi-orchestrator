@@ -1,4 +1,4 @@
-import { capabilities, validatePermissionMode, yoloSandbox, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
+import { capabilities, validatePermissionMode, yoloSandbox, type EngineCatalog, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
 import { RuntimeProcess } from "./process.ts";
 import { WORKER_CONTRACT } from "../worker-contract.ts";
 
@@ -42,6 +42,42 @@ export class CodexAdapter implements RuntimeAdapter {
   capabilities = { ...capabilities, steer: true, resume: true };
 
   constructor(private readonly executable = "codex") {}
+
+  /** model/list from a short-lived app-server: initialize, list, exit. */
+  async catalog(cwd: string, signal: AbortSignal): Promise<EngineCatalog> {
+    const runtime = new RuntimeProcess(this.executable, ["app-server", "--listen", "stdio://", "--disable", "hooks", "-c", "notify=[]"], cwd, signal);
+    const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
+    let failure: Error | undefined;
+    runtime.onFailure = (error) => { failure = error; for (const waiter of pending.values()) waiter.reject(error); pending.clear(); };
+    runtime.onMessage = (message) => {
+      const waiter = typeof message.id === "number" ? pending.get(message.id) : undefined;
+      if (!waiter || message.method !== undefined) return;
+      pending.delete(message.id);
+      if (message.error) waiter.reject(new Error(typeof message.error?.message === "string" ? message.error.message : "Codex RPC failed")); else waiter.resolve(message.result);
+    };
+    let id = 0;
+    const request = (method: string, params: unknown) => new Promise<any>((resolve, reject) => {
+      if (failure) { reject(failure); return; }
+      const key = ++id; pending.set(key, { resolve, reject });
+      const timer = setTimeout(() => { pending.delete(key); reject(new Error(`Codex RPC timeout: ${method}`)); }, 20_000);
+      pending.set(key, { resolve: (value) => { clearTimeout(timer); resolve(value); }, reject: (error) => { clearTimeout(timer); reject(error); } });
+      runtime.send({ id: key, method, params });
+    });
+    try {
+      await request("initialize", { clientInfo: { name: "pi-orchestrator", title: "Pi orchestrator prototype", version: "0.1.0" }, capabilities: { experimentalApi: false } });
+      runtime.send({ method: "initialized" });
+      const listing = await request("model/list", { includeHidden: false, limit: 100 });
+      if (!Array.isArray(listing?.data)) throw new Error("Codex returned an invalid model listing");
+      return {
+        models: listing.data.slice(0, 64).filter((item: any) => typeof item?.model === "string").map((item: any) => ({
+          id: String(item.model).slice(0, 128), ...(typeof item.displayName === "string" ? { name: item.displayName.slice(0, 160) } : {}),
+          efforts: Array.isArray(item.supportedReasoningEfforts) ? item.supportedReasoningEfforts.map((effort: any) => String(effort?.reasoningEffort)).slice(0, 16) : [],
+          ...(item.isDefault === true ? { default: true } : {}),
+        })),
+        note: `Without thinking, workers use ${defaultEffort()} (PI_ORCHESTRATOR_CODEX_DEFAULT_THINKING); without model, Codex's configured default.`,
+      };
+    } finally { await runtime.stop(); }
+  }
 
   async run(context: RuntimeContext): Promise<string> {
     const yolo = validatePermissionMode(context.task.permissionMode) === "yolo";

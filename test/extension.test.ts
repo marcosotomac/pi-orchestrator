@@ -31,7 +31,7 @@ test("Pi loads the actual extension file, exposes tools, executes commands witho
       cwd, resourceLoader: loader, settingsManager, sessionManager: SessionManager.inMemory(cwd), noTools: "builtin",
     }));
     await session.bindExtensions({ mode: "json", onError: (error) => { errors.push(error.error); } });
-    assert.deepEqual(session.getActiveToolNames().sort(), ["orchestrator_cancel", "orchestrator_continue", "orchestrator_delegate", "orchestrator_status", "orchestrator_wait"]);
+    assert.deepEqual(session.getActiveToolNames().sort(), ["orchestrator_cancel", "orchestrator_continue", "orchestrator_delegate", "orchestrator_engines", "orchestrator_status", "orchestrator_wait"]);
     assert.equal(existsSync(stateDirectory), false, "loading/binding starts no service or persistence");
     await session.prompt("/orch history");
     assert.equal(existsSync(stateDirectory), false, "history does not create a journal/service");
