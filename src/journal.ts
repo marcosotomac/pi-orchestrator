@@ -24,6 +24,8 @@ const taskSchema = z.object({
   modelState: z.object({ model: z.string().max(128).optional(), thinking: z.string().max(128).optional(), availableModels: z.array(z.object({ id: z.string().max(128), name: z.string().max(160) }).strict()).max(128), availableThinking: z.array(z.string().max(128)).max(128) }).strict().optional(),
   diagnostic: z.object({ category: z.enum(["authentication", "network", "quota", "transient", "protocol", "cleanup", "unknown"]), recovery: z.string().max(512), automaticRetry: z.boolean() }).strict().optional(),
   result: z.string().max(20_000).optional(), partialResult: z.string().max(20_000).optional(), error: z.string().max(8_000).optional(),
+  web: z.boolean().optional(),
+  context: z.object({ used: z.number().int().nonnegative(), size: z.number().int().positive() }).strict().optional(),
   workspace: z.enum(["worktree", "in-place"]).optional(),
   changes: z.object({ state: z.enum(["pending", "applied", "discarded", "none"]), files: z.number().int().nonnegative(), insertions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(), summary: z.string().max(4_000), repo: z.string().max(8_192).optional(), worktree: z.string().max(8_192).optional(), patchPath: z.string().max(8_192).optional(), base: z.string().max(64).optional(), error: z.string().max(500).optional() }).strict().optional(),
   usage: z.object({ inputTokens: z.number().int().nonnegative(), cachedInputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), reasoningTokens: z.number().int().nonnegative().optional(), costUsd: z.number().nonnegative().optional() }).strict().optional(),

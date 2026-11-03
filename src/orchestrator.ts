@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { realpathSync, statSync } from "node:fs";
-import { isAbsolute, resolve as resolvePath, sep } from "node:path";
+import { mkdtempSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, resolve as resolvePath, sep } from "node:path";
 import type { Engine, EngineCatalog, RecoverySource, RuntimeAdapter, RuntimeControls, TaskUsage, TaskView } from "./types.ts";
 import { FairQueue } from "./fair-queue.ts";
 import { RuntimeBudget } from "./budget.ts";
@@ -174,11 +175,11 @@ export class Orchestrator {
   }
 
   private snapshot(view: TaskView): TaskView {
-    return { ...view, ...(view.selection ? { selection: { ...view.selection } } : {}), ...(view.modelState ? { modelState: structuredClone(view.modelState) } : {}), ...(view.diagnostic ? { diagnostic: { ...view.diagnostic } } : {}), ...(view.continuationSource ? { continuationSource: { ...view.continuationSource } } : {}), ...(view.recoverySource ? { recoverySource: { ...view.recoverySource } } : {}), ...(view.runtimeProcess ? { runtimeProcess: { ...view.runtimeProcess } } : {}), ...(view.usage ? { usage: { ...view.usage } } : {}), ...(view.changes ? { changes: { ...view.changes } } : {}) };
+    return { ...view, ...(view.selection ? { selection: { ...view.selection } } : {}), ...(view.modelState ? { modelState: structuredClone(view.modelState) } : {}), ...(view.diagnostic ? { diagnostic: { ...view.diagnostic } } : {}), ...(view.continuationSource ? { continuationSource: { ...view.continuationSource } } : {}), ...(view.recoverySource ? { recoverySource: { ...view.recoverySource } } : {}), ...(view.runtimeProcess ? { runtimeProcess: { ...view.runtimeProcess } } : {}), ...(view.usage ? { usage: { ...view.usage } } : {}), ...(view.changes ? { changes: { ...view.changes } } : {}), ...(view.context ? { context: { ...view.context } } : {}) };
   }
 
-  delegate(callerId: string | null, engine: Engine, prompt: string, requestKey: string, recoverySource?: RecoverySource, selection?: ModelSelection, permissionMode?: PermissionMode, cwd?: string): TaskView {
-    return this.admit(callerId, engine, prompt, requestKey, recoverySource, undefined, undefined, selection, permissionMode, cwd);
+  delegate(callerId: string | null, engine: Engine, prompt: string, requestKey: string, recoverySource?: RecoverySource, selection?: ModelSelection, permissionMode?: PermissionMode, cwd?: string, web?: boolean): TaskView {
+    return this.admit(callerId, engine, prompt, requestKey, recoverySource, undefined, undefined, selection, permissionMode, cwd, web);
   }
 
   /** An operator-chosen directory: real, a directory, and inside cwd or an allowed root. */
@@ -207,7 +208,7 @@ export class Orchestrator {
     return continuation;
   }
 
-  private admit(callerId: string | null, engine: Engine, prompt: string, requestKey: string, recoverySource?: RecoverySource, resumeSessionId?: string, continuationSource?: { taskId: string; attemptId: string }, requestedSelection?: ModelSelection, requestedPermissionMode?: PermissionMode, requestedCwd?: string): TaskView {
+  private admit(callerId: string | null, engine: Engine, prompt: string, requestKey: string, recoverySource?: RecoverySource, resumeSessionId?: string, continuationSource?: { taskId: string; attemptId: string }, requestedSelection?: ModelSelection, requestedPermissionMode?: PermissionMode, requestedCwd?: string, web?: boolean): TaskView {
     const permissionMode = validatePermissionMode(requestedPermissionMode);
     if (callerId !== null && permissionMode === "yolo") throw new Error("Only the operator may authorize YOLO; nested tasks cannot escalate permissions");
     const prefix = `PI_ORCHESTRATOR_${engine.toUpperCase()}`;
@@ -230,9 +231,11 @@ export class Orchestrator {
     if (parent && (parent.view.state !== "running" || !this.identities.has(parent.tokenHash))) throw new Error("Caller is no longer running");
     // Children run where their parent runs (its worktree included); only the operator picks a directory.
     if (parent && requestedCwd !== undefined) throw new Error("Nested tasks run in their parent's directory");
+    if (web !== undefined && typeof web !== "boolean") throw new Error("Invalid web flag");
+    if (parent && web) throw new Error("Only the operator may grant internet access; nested tasks cannot request it");
     const cwd = parent ? parent.effectiveCwd ?? parent.view.cwd : this.placement(requestedCwd);
     const key = JSON.stringify([callerId, requestKey]);
-    const signature = this.hash(JSON.stringify([engine, prompt, recoverySource, resumeSessionId, continuationSource, selection, permissionMode, cwd]));
+    const signature = this.hash(JSON.stringify([engine, prompt, recoverySource, resumeSessionId, continuationSource, selection, permissionMode, cwd, Boolean(web)]));
     const previous = this.requests.get(key);
     if (previous) {
       if (previous.signature !== signature) throw new Error("requestKey already used with different arguments");
@@ -250,7 +253,7 @@ export class Orchestrator {
     if (queued && this.queue.size >= this.maxQueued) throw new Error("Root queue limit reached");
     const token = randomBytes(32).toString("base64url");
     const view: TaskView = {
-      id: randomUUID(), title: prompt.trim().replace(/\s+/g, " ").slice(0, 160), attemptId: randomUUID(), parentId: callerId, engine, depth, selection, permissionMode,
+      id: randomUUID(), title: prompt.trim().replace(/\s+/g, " ").slice(0, 160), attemptId: randomUUID(), parentId: callerId, engine, depth, selection, permissionMode, ...(web ? { web: true } : {}),
       cwd, state: queued ? "queued" : "running", createdAt: new Date().toISOString(),
       ...(recoverySource ? { recoverySource: { ...recoverySource } } : {}),
       ...(resumeSessionId ? { continuation: "native-resume" as const, continuationSource: { ...continuationSource! } } : {}),
@@ -354,6 +357,12 @@ export class Orchestrator {
           // Display-only: the final settle checkpoint persists it without an fsync per update.
           this.emit("usage", entry, undefined, false);
         },
+        context: (used, size) => {
+          if (isTerminal(entry.view) || !this.identities.has(entry.tokenHash)) return;
+          if (!Number.isSafeInteger(used) || !Number.isSafeInteger(size) || used < 0 || size < 1 || used > size * 4) return;
+          entry.view.context = { used, size };
+          this.emit("context", entry, undefined, false);
+        },
         partial: (text) => {
           // Memory only: no event or checkpoint per streamed fragment.
           if (isTerminal(entry.view) || !this.identities.has(entry.tokenHash) || typeof text !== "string") return;
@@ -417,7 +426,12 @@ export class Orchestrator {
       if (typeof output !== "string" || !output.trim()) throw new Error("Runtime returned no result");
       output = this.redact(output, token);
       // Discarding a long answer throws away every token the runtime spent on it.
-      if (output.length > MAX_RESULT) output = output.slice(0, MAX_RESULT - TRUNCATION_NOTE.length) + TRUNCATION_NOTE;
+      if (output.length > MAX_RESULT) {
+        // The full answer is kept in a private file; the published result points to it.
+        const path = this.saveFullResult(entry.view.id, output);
+        const note = path ? `\n\n[Resultado truncado por el orquestador: superaba ${MAX_RESULT} caracteres. Texto completo (${output.length} caracteres) en ${path}]` : TRUNCATION_NOTE;
+        output = output.slice(0, MAX_RESULT - note.length) + note;
+      }
     } catch (error) { didFail = true; failure = error; }
     finally {
       clearTimeout(timer); clearTimeout(soft);
@@ -487,6 +501,16 @@ export class Orchestrator {
     if (source.view.parentId !== null) throw new Error("Only root tasks can be retried; retry their parent instead");
     if (!isTerminal(source.view)) throw new Error("Task is still active; cancel it before retrying");
     return this.admit(null, source.view.engine, source.prompt, requestKey, undefined, undefined, undefined, source.view.selection, source.view.permissionMode, source.view.cwd === this.cwd ? undefined : source.view.cwd);
+  }
+
+  private resultDirectory?: string;
+  private saveFullResult(taskId: string, text: string): string | undefined {
+    try {
+      this.resultDirectory ??= mkdtempSync(join(tmpdir(), "pi-orch-results-"));
+      const path = join(this.resultDirectory, `${taskId}.md`);
+      writeFileSync(path, text, { mode: 0o600 });
+      return path;
+    } catch { return undefined; }
   }
 
   /** One automatic retry is safe only when repeating cannot duplicate side effects. */

@@ -147,3 +147,28 @@ test("batches are per agent run: a slow task from an earlier run does not hold b
     assert.deepEqual(sent[1].details.batch.map((task: TaskView) => task.id), [slow.id]);
   } finally { await service?.close(); }
 });
+
+test("/orch ENGINE: prompt delegates directly, without a main-model turn", async () => {
+  let service: Service | undefined;
+  let command!: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+  const userMessages: unknown[] = [];
+  const sent: any[] = [];
+  const fake = { registerMessageRenderer() {}, registerToolRenderer() {}, on() {}, appendEntry() {}, registerTool() {},
+    sendUserMessage(value: unknown) { userMessages.push(value); }, sendMessage(message: any) { sent.push(message); },
+    registerCommand(_name: string, definition: { handler: typeof command }) { command = definition.handler; },
+  } as unknown as ExtensionAPI;
+  createOrchestratorExtension(async (options) => {
+    service = await createService(options, { antigravity: { capabilities, run: async (ctx) => `agy did ${ctx.prompt}` }, claude: { capabilities, run: async (ctx) => `claude did ${ctx.prompt}` } });
+    return service;
+  })(fake);
+  const ctx = { cwd: process.cwd(), mode: "rpc", ui: { setStatus() {}, setWidget() {}, notify() {} } } as unknown as ExtensionCommandContext;
+  try {
+    await command("agy: explora el repo", ctx);
+    await command("Claude:resume: el README", ctx);
+    assert.deepEqual(userMessages, [], "no model turn was requested");
+    const tasks = service!.core.list();
+    assert.deepEqual(tasks.map((task) => [task.engine, task.title]), [["antigravity", "explora el repo"], ["claude", "resume: el README"]]);
+    await command("usa claude para resumir", ctx);
+    assert.equal(userMessages.length, 1, "natural language still goes through the model");
+  } finally { await service?.close(); }
+});

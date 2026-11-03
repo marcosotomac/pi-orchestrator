@@ -1,6 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, SelectList, Text, truncateToWidth, type Component, type KeybindingsManager } from "@earendil-works/pi-tui";
-import { changesLine, elapsed, safeText, subtree, summary, urgentRows, taskRow, modelLabel, taskPhase, taskDetail, stateIcon, failureAdvice, friendlyError, formatTokens, activityLabel, isStalled, type Attention } from "./presentation.ts";
+import { changesLine, contextLabel, elapsed, safeText, subtree, summary, urgentRows, taskRow, modelLabel, taskPhase, taskDetail, stateIcon, failureAdvice, friendlyError, formatTokens, activityLabel, isStalled, type Attention } from "./presentation.ts";
 import { isTerminal, type TaskView } from "./types.ts";
 
 /** Actions that need Pi dialogs, the editor or the chat run after the panel closes. */
@@ -106,7 +106,7 @@ export class TaskDashboard implements Component {
       const attention = this.options.attention?.(task.id);
       const stalled = isStalled(task, tasks, now);
       const color = task.state === "failed" ? "error" : task.state === "completed" ? "success" : attention || stalled || task.state === "cancelling" ? "warning" : "accent";
-      const tokens = formatTokens(task.usage);
+      const tokens = formatTokens(task.usage) ?? contextLabel(task);
       lines.push(theme.fg(color, `${stateIcon[task.state]} ${taskPhase(task, attention)} · ${elapsed(task, now)}${tokens ? ` · ${tokens}` : ""}`));
       const detail = taskDetail(task, tasks, attention, now);
       const meta = safeText([
@@ -181,7 +181,7 @@ export class TaskDashboard implements Component {
     const action = ({ s: controls.steer && "steer", r: controls.resume && "resume", R: controls.retry && "retry", e: hasText && "editor", i: hasText && "insert", y: hasText && "copy", a: pending && "apply", x: pending && "discard" } as Record<string, string | false>)[data];
     if (task && action) { this.finish({ kind: action as PanelAction["kind"], taskId: task.id }); return; }
     if (task && ["s", "r", "R", "e", "i", "y", "a", "x"].includes(data)) {
-      this.notice = { s: "Redirigir solo está disponible en tareas de Codex en curso.", r: "Reanudar solo está disponible en sesiones completadas que lo admiten.", R: "Solo se reintentan tareas raíz ya terminadas.", e: "Esta tarea aún no tiene resultado.", i: "Esta tarea aún no tiene resultado.", y: "Esta tarea aún no tiene resultado.", a: "Esta tarea no tiene cambios pendientes.", x: "Esta tarea no tiene cambios pendientes." }[data as "s"]!;
+      this.notice = { s: "Redirigir solo está disponible en tareas de Codex o Claude en curso.", r: "Reanudar solo está disponible en sesiones completadas que lo admiten.", R: "Solo se reintentan tareas raíz ya terminadas.", e: "Esta tarea aún no tiene resultado.", i: "Esta tarea aún no tiene resultado.", y: "Esta tarea aún no tiene resultado.", a: "Esta tarea no tiene cambios pendientes.", x: "Esta tarea no tiene cambios pendientes." }[data as "s"]!;
     } else if (data === "d") { this.details = !this.details; this.offset = 0; }
     else if (data === "f") {
       this.filter = this.filter === "all" ? "active" : this.filter === "active" ? "failed" : "all";

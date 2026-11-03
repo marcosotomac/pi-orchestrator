@@ -198,3 +198,23 @@ test("spend guards refuse new work once reached, never kill running work, and ar
     assert.throws(() => priced.delegate(null, "claude", "b", "b"), /Session cost limit reached \(\$0\.60/);
   } finally { await priced.close(); }
 });
+
+test("internet access is operator-only, task-local and never inherited", async () => {
+  let core!: Orchestrator;
+  const seen: Record<string, boolean | undefined> = {};
+  const run = async (ctx: RuntimeContext) => {
+    seen[ctx.prompt] = ctx.task.web;
+    if (ctx.prompt === "parent") {
+      assert.throws(() => core.delegate(ctx.task.id, "claude", "child-web", "cw", undefined, undefined, undefined, undefined, true), /Only the operator may grant internet/);
+      await core.wait(ctx.task.id, core.delegate(ctx.task.id, "claude", "child", "c").id, 10_000);
+    }
+    return "ok";
+  };
+  core = new Orchestrator({ cwd: process.cwd(), maxConcurrent: 4, adapters: { claude: { capabilities, run } } });
+  core.attachEndpoint("http://127.0.0.1:1/mcp");
+  try {
+    const parent = await core.wait(null, core.delegate(null, "claude", "parent", "p", undefined, undefined, undefined, undefined, true).id);
+    assert.equal(parent.web, true);
+    assert.deepEqual(seen, { parent: true, child: undefined }, "the child of a web task has no internet");
+  } finally { await core.close(); }
+});

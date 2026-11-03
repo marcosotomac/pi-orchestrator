@@ -127,6 +127,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         ? taskCard((content as { task: TaskView }).task, true) : JSON.stringify(content, null, 2)), display: true, details: content,
     });
     const attentionOf = (id: string) => attention.get(id);
+    const appended = new Map<string, number>();
     // The terminal of the live TUI, captured from Pi's own component factories.
     let tuiRef: TerminalHandle | undefined;
     let ticker: ReturnType<typeof setInterval> | undefined;
@@ -143,6 +144,10 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
       const clean = (text: string) => safeText(text).replace(/[;\\]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
       try { tuiRef.terminal.write(notifyMode === "bell" ? "\x07" : `\x1b]777;notify;${clean(title)};${clean(body)}\x07`); } catch { /* observer only */ }
     };
+    // The widget renders live from `tasks()`: install it once per context and only
+    // ask for a repaint afterwards (measured: one reinstall per event before).
+    let widgetContext: ExtensionContext | undefined;
+    let lastStatus: string | undefined;
     const refresh = () => {
       for (const listener of listeners) { try { listener(); } catch { /* independent view */ } }
       if (latestContext?.mode !== "tui") return;
@@ -151,8 +156,11 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
       // Elapsed time and stall warnings change without events: tick only while work is live.
       if (live && !ticker) { ticker = setInterval(() => { try { tuiRef?.requestRender(); } catch { /* closed */ } }, 1_000); ticker.unref(); }
       if (!live && ticker) { clearInterval(ticker); ticker = undefined; }
-      latestContext.ui.setStatus("orchestrator", current.length ? `orch · ${summary(current, attentionOf)}` : undefined);
-      if (!current.length) { latestContext.ui.setWidget("orchestrator", undefined); return; }
+      const status = current.length ? `orch · ${summary(current, attentionOf)}` : undefined;
+      if (status !== lastStatus || widgetContext !== latestContext) { latestContext.ui.setStatus("orchestrator", status); lastStatus = status; }
+      if (!current.length) { latestContext.ui.setWidget("orchestrator", undefined); widgetContext = undefined; return; }
+      if (widgetContext === latestContext && tuiRef) { try { tuiRef.requestRender(); } catch { /* closed */ } return; }
+      widgetContext = latestContext;
       latestContext.ui.setWidget("orchestrator", (tui, theme) => {
         tuiRef = tui as unknown as TerminalHandle;
         return {
@@ -208,7 +216,14 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         onEvent(event) {
           if (!active) return;
           snapshots.set(event.task.id, event.task);
-          pi.appendEntry("orchestrator-event", event);
+          // High-frequency display events reach the session file at most every 2 s per task;
+          // lifecycle events (started, settled, changes…) are always recorded.
+          const frequent = event.type === "activity" || event.type === "usage" || event.type === "context";
+          const now = Date.now();
+          if (!frequent || now - (appended.get(event.task.id) ?? 0) >= 2_000) {
+            if (frequent) appended.set(event.task.id, now);
+            pi.appendEntry("orchestrator-event", event);
+          }
           refresh();
           if (event.type === "settled" && event.task.parentId === null) {
             const outcome = { completed: "terminó", failed: "falló", cancelled: "se canceló" }[event.task.state as "completed"] ?? event.task.state;
@@ -235,6 +250,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         if (ticker) { clearInterval(ticker); ticker = undefined; }
         latestContext?.ui.setStatus("orchestrator", undefined);
         latestContext?.ui.setWidget("orchestrator", undefined);
+        widgetContext = undefined; lastStatus = undefined; appended.clear();
         snapshots.clear(); attention.clear(); listeners.clear(); toolTasks.clear(); ledger.clear(); waiting.clear(); latestContext = undefined; tuiRef = undefined;
         if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
       }
@@ -329,6 +345,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         thinking: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Per-task native thinking/effort: Codex reasoning effort; Claude effort (low, medium, high, xhigh, max); Antigravity thought_level. Use the requested level only; never silently downgrade." })),
         permissionMode: Type.Optional(Type.Union([Type.Literal("restricted"), Type.Literal("yolo")], { description: "Task-local permission policy. Use yolo only for explicit operator intent to run without tool approvals; interpret meaning, not a required phrase. Omit to retain restrictions. No global defaults or inherited authorization." })),
         requestKey: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+        web: Type.Optional(Type.Boolean({ description: "Internet access (search/fetch) for this task. Set true ONLY when the operator explicitly asks to research the web or online docs; it can leak repository content to the internet. Claude and Codex only; nested tasks never get it." })),
         cwd: Type.Optional(Type.String({ minLength: 1, maxLength: 4_096, description: "Directory to run in, only when the operator names another project or subdirectory. Must be inside Pi's cwd or PI_ORCHESTRATOR_ALLOWED_ROOTS. Omit to use Pi's cwd." })),
       }),
       async execute(callId, params, signal, _update, ctx) {
@@ -342,9 +359,14 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
           signal?.throwIfAborted();
           if (!accepted) throw new Error("The operator did not confirm YOLO; the task was not started. Ask before retrying, or delegate without permissionMode.");
         }
+        if (params.web && ctx.mode === "tui" && ctx.hasUI) {
+          const ok = await ctx.ui.confirm("Permitir internet para esta tarea", safeText(`${params.engine}\n\nPodrá buscar y abrir páginas web. Un contenido malicioso podría intentar que envíe datos del repositorio a internet. Confirma solo si pediste investigar en la web.\n\nTarea:\n${params.prompt.slice(0, 600)}`), { signal });
+          signal?.throwIfAborted();
+          if (!ok) throw new Error("The operator did not allow internet access; the task was not started. Delegate without web, or ask.");
+        }
         const { core } = await get(ctx);
         signal?.throwIfAborted();
-        const task = core.delegate(null, params.engine, params.prompt, params.requestKey ?? callId, undefined, { ...(params.model ? { model: params.model } : {}), ...(params.thinking ? { thinking: params.thinking } : {}) }, params.permissionMode, params.cwd);
+        const task = core.delegate(null, params.engine, params.prompt, params.requestKey ?? callId, undefined, { ...(params.model ? { model: params.model } : {}), ...(params.thinking ? { thinking: params.thinking } : {}) }, params.permissionMode, params.cwd, params.web);
         if (!toolTasks.has(task.id)) toolTasks.set(task.id, agentRun);
         latestContext = ctx;
         return reply(task, { ...once(task), next: deferred() ? NEXT_DEFERRED : NEXT_BLOCKING });
@@ -444,10 +466,10 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
       try {
         switch (action.kind) {
           case "steer": {
-            const value = (await ctx.ui.input("Redirigir la tarea de Codex", "Nueva indicación para el turno actual…"))?.trim();
+            const value = (await ctx.ui.input(`Redirigir la tarea de ${task.engine}`, "Nueva indicación para el turno actual…"))?.trim();
             if (!value) return true;
             await core.steer(null, task.id, value);
-            ctx.ui.notify("Codex recibió la indicación; eso no garantiza que la respuesta final la siga.", "info");
+            ctx.ui.notify(`${task.engine} recibió la indicación; eso no garantiza que la respuesta final la siga.`, "info");
             return true;
           }
           case "resume": {
@@ -504,6 +526,15 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
           || /^(?:steer|resume)\s+[a-fA-F0-9-]{6,}\s+\S/.test(instruction)
           || (verb === "restart" && Boolean(argument) && rest.length > 0);
         const legacyStart = ["start", "run"].includes(verb) && ["codex", "claude", "antigravity"].includes(argument ?? "");
+        // Fast path "/orch ENGINE: prompt": no main-model turn to interpret an unambiguous
+        // request (restricted, configured defaults). The result card is the answer.
+        const direct = /^(codex|claude|agy|antigravity)\s*:\s*(\S[\s\S]*)$/i.exec(instruction);
+        if (direct) {
+          const engine = ({ agy: "antigravity" } as Record<string, Engine>)[direct[1]!.toLowerCase()] ?? direct[1]!.toLowerCase() as Engine;
+          const { core } = await get(ctx);
+          message(core.delegate(null, engine, direct[2]!.trim(), randomUUID()));
+          return;
+        }
         if (instruction && !administrative && !legacyStart) {
           if (instruction.length > 32_000) throw new Error("La instrucción /orch no puede superar 32000 caracteres");
           pi.sendUserMessage([

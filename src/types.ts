@@ -65,6 +65,10 @@ export interface TaskView {
   error?: string;
   diagnostic?: import("./diagnostics.ts").FailureDiagnostic;
   usage?: TaskUsage;
+  /** Operator-granted internet access for this task (search/fetch tools); never inherited. */
+  web?: boolean;
+  /** Context window occupancy a runtime reports (Antigravity usage_update); not consumption. */
+  context?: { used: number; size: number };
   /** "worktree": a YOLO root isolated in a private checkout; "in-place": not a git repo. */
   workspace?: "worktree" | "in-place";
   changes?: import("./workspace.ts").TaskChanges;
@@ -88,6 +92,8 @@ export interface RuntimeContext {
   usage?: (usage: TaskUsage) => void;
   /** Latest answer text so far (replaces earlier reports); published only if the attempt does not complete. */
   partial?: (text: string) => void;
+  /** Context window occupancy (tokens used of the window), display-only. */
+  context?: (used: number, size: number) => void;
 }
 
 export interface RuntimeAdapter {

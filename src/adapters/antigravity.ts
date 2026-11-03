@@ -85,6 +85,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
         if (output.length <= 20_000) output += update.content.text.slice(0, 20_001 - output.length);
         ctx.partial?.(output);
       } else if (update?.sessionUpdate === "tool_call" || update?.sessionUpdate === "tool_call_update") ctx.activity("antigravity: tool activity");
+      else if (update?.sessionUpdate === "usage_update" && typeof update.used === "number" && typeof update.size === "number") ctx.context?.(update.used, update.size);
     };
     const fail = (error: Error) => {
       protocolError ??= error;

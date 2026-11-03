@@ -305,6 +305,17 @@ Sin variables se conservan los modelos predeterminados de cada runtime. Codex re
   - Medido: los tres motores responden en 4,3 s. En una prueba real, el modelo principal resolvió "argon" como `gemini-4-argon` consultando el catálogo, en lugar de adivinar.
 - `PI_ORCHESTRATOR_MAX_TOKENS` y `PI_ORCHESTRATOR_MAX_COST_USD` limitan el gasto de la sesión según lo que informa cada motor (solo Claude informa dólares). Al alcanzarse se rechaza trabajo nuevo, pero no se mata el que está en curso. `/orch usage` muestra el consumo frente al tope.
 
+## Otras mejoras medidas
+
+- **Codex más barato por llamada:** se desactivan familias de herramientas que un trabajador no usa (navegador, uso del ordenador, imágenes, sugerencias…). Medido: de 17 400 a 16 160 tokens de entrada por llamada, un 7,1 % menos; la ejecución de comandos y MCP siguen funcionando.
+- **Motores precalentados: no se implementan.** Medido: el hilo de Codex está listo en 0,5–0,9 s y la respuesta del modelo tarda 3,5–5 s, así que el ahorro posible no compensa mantener procesos vivos.
+- **Resultados largos:** el texto completo se guarda en un archivo privado (0600) y el resultado publicado indica su ruta.
+- **Plazo blando también en Claude:** su entrada queda abierta durante el turno y la indicación se atiende en la siguiente pausa entre herramientas. Medido con un plazo de 60 s: respondió `WRAPPED-UP` a los 53 s y quedó completada. Con pasos de 20 s no da tiempo dentro de un plazo de 60 s; con el de 15 min por defecto el margen es de 2,25 min. Ahora Claude también se puede redirigir (`s`).
+- **Antigravity:** su `usage_update` se muestra como "contexto X de Y", ocupación y no consumo.
+- **Internet por tarea (`web`):** solo la concede el operador (diálogo en la TUI), las subtareas no la heredan, y el Bash de Claude sigue sin red. Medido: Claude con permiso abrió example.com, sin permiso lo bloqueó el sandbox, y Codex usó su búsqueda.
+- **Atajo `/orch codex: …`, `/orch claude: …` o `/orch agy: …`:** delega directamente sin una vuelta del modelo principal; la tarjeta es la respuesta.
+- **Menos trabajo de interfaz:** el widget se instala una vez y luego solo se repinta, y los eventos frecuentes se escriben en la sesión como mucho cada 2 s por tarea. Medido en una tarea real: de 18 a 1 reinstalaciones del widget y de 18 a 10 escrituras en la sesión.
+
 ## Historial por defecto
 
 La extensión guarda el historial en `~/.pi/agent/orchestrator-state` (directorio 0700, archivos 0600). `PI_ORCHESTRATOR_STATE_DIR` elige otro directorio y `PI_ORCHESTRATOR_STATE_DIR=off` lo desactiva. Retención: se conservan los 100 runs más recientes; solo se borran runs más antiguos con cierre registrado y archivo válido (nunca runs sin cierre, que podrían seguir vivos, ni archivos inválidos). La actividad se escribe en disco como mucho cada 5 s por tarea (medido en una tarea real de Codex: 18 → 11 escrituras); el cierre de cada tarea siempre se escribe.

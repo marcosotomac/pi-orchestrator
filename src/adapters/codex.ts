@@ -218,7 +218,11 @@ export class CodexAdapter implements RuntimeAdapter {
           "features.multi_agent": false,
           "features.apps": false,
           "features.plugins": false,
-          "web_search": "disabled",
+          // Tool families a delegated worker never uses. Measured: 17,400 → 16,160 input
+          // tokens per model call (-7.1%) with shell, MCP and view_image still available.
+          ...Object.fromEntries(["browser_use", "browser_use_external", "computer_use", "image_generation", "goals", "skill_search", "tool_suggest", "in_app_browser", "worktrees", "sleep_tool", "realtime_conversation", "plugin_discovery_prefetch"].map((feature) => [`features.${feature}`, false])),
+          // Hosted search only when the operator granted it for this task.
+          "web_search": context.task.web ? "live" : "disabled",
           // Never inherit the user's global effort (e.g. xhigh) for workers.
           model_reasoning_effort: context.task.selection?.thinking ?? defaultEffort(),
           "mcp_optional_startup_grace_ms": 10_000,

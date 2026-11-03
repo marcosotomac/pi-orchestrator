@@ -152,7 +152,12 @@ test("oversized results are truncated with an explicit notice, the exact boundar
     const truncated = await core.wait(null, oversized.id);
     assert.equal(truncated.state, "completed");
     assert.equal(truncated.result!.length, 20_000);
-    assert.ok(truncated.result!.endsWith(TRUNCATION_NOTE), "truncation must be labelled, never silent");
+    const saved = /Texto completo \(20001 caracteres\) en (\S+\.md)\]$/.exec(truncated.result!);
+    assert.ok(saved, "truncation must be labelled, never silent, and point to the full text");
+    const { readFileSync, statSync } = await import("node:fs");
+    assert.equal(readFileSync(saved![1]!, "utf8"), "x".repeat(20_001), "nothing the runtime wrote is lost");
+    assert.equal(statSync(saved![1]!).mode & 0o777, 0o600);
+    void TRUNCATION_NOTE; // fallback note when the file cannot be written
     assert.equal(truncated.runtimeSessionId, "session [REDACTED] Bearer [REDACTED]");
     const exact = core.delegate(null, "claude", "exact", "exact");
     const completed = await core.wait(null, exact.id);

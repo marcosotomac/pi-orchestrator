@@ -248,7 +248,7 @@ export function taskRow(task: TaskView, prefix: string, width: number, tasks: Ta
 export function taskCardParts(task: TaskView, expanded = false, attention?: Attention): { head: string; body?: { text: string; markdown: boolean }; tail: string } {
   const result = safeText(task.error ? `${friendlyError(task.error)}${task.partialResult ? `\n\n${task.partialResult}` : ""}` : task.result ?? "");
   const preview = expanded || result.length <= 480 ? result : `${result.slice(0, 480)}…`;
-  const tokens = formatTokens(task.usage);
+  const tokens = formatTokens(task.usage) ?? contextLabel(task);
   const head = [
     `${stateIcon[task.state]} ${taskPhase(task, attention)} · ${elapsed(task)}${tokens ? ` · ${tokens}` : ""}`,
     oneLine(task.title), modelLabel(task),
@@ -257,6 +257,7 @@ export function taskCardParts(task: TaskView, expanded = false, attention?: Atte
   const tail: string[] = [];
   const changes = changesLine(task);
   if (changes) tail.push(changes);
+  if (task.web) tail.push("Con acceso a internet (autorizado por ti para esta tarea).");
   if (task.state === "failed") tail.push(failureAdvice(task));
   if (expanded) {
     tail.push(`Tarea: ${task.id} · intento: ${task.attemptId}`, `Workspace: ${safeText(task.cwd)}`, `Sesión nativa: ${safeText(task.runtimeSessionId ?? "no registrada")}`);
@@ -325,6 +326,13 @@ export function formatInteractionDetail(detail: string): string {
   return lines.length ? lines.join("\n") : "El motor no envió detalles de la operación. Deniega si no puedes verificarla.";
 }
 
+/** "contexto 13.6k de 1.0M": occupancy, labelled so it is never read as consumption. */
+export function contextLabel(task: TaskView): string | undefined {
+  if (!task.context) return undefined;
+  const k = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(1)}k` : String(n);
+  return `contexto ${k(task.context.used)} de ${k(task.context.size)}`;
+}
+
 /** One line about a YOLO task's isolated changes, or undefined. */
 export function changesLine(task: TaskView): string | undefined {
   const changes = task.changes;
@@ -340,6 +348,7 @@ export function helpText(advanced: string): string {
     "Uso: /orch INSTRUCCIÓN en lenguaje natural",
     "  /orch delega a agy 3.8 flash high para explorar este repo sin modificar archivos",
     "  /orch usa codex high para revisar los tests y claude para resumir el README",
+    "  /orch claude: resume el README   (directo: sin pasar por el modelo principal)",
     "",
     "Panel: /orch (o /orch panel)",
     "  ↑↓ elegir · s redirigir · r reanudar · R reintentar · e editor · i insertar en el chat",

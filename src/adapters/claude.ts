@@ -25,7 +25,9 @@ export function claudeBudget(env: NodeJS.ProcessEnv = process.env): string {
 
 /** Claude Code CLI session with its own OAuth/API credentials and scoped MCP tools. */
 export class ClaudeAdapter implements RuntimeAdapter {
-  capabilities = capabilities;
+  // steer: stdin stays open during the turn; a user message sent mid-run is taken at the
+  // next tool boundary of the same turn (measured with Claude Code 2.1.317: one result).
+  capabilities = { ...capabilities, steer: true };
 
   constructor(private readonly executable = "claude") {}
 
@@ -41,7 +43,9 @@ export class ClaudeAdapter implements RuntimeAdapter {
     // write-denied (measured: reads/node run; writes to repo, $HOME, /tmp and network
     // are blocked), so they can verify claims (tsc, tests) without modifying anything.
     const sandboxed = !yolo || yoloSandbox() === "on";
-    const tools = yolo ? "Read,Glob,Grep,Bash,Write,Edit" : "Read,Glob,Grep,Bash";
+    // WebSearch/WebFetch only when the operator granted internet access for this task;
+    // Bash stays offline in the sandbox either way.
+    const tools = `${yolo ? "Read,Glob,Grep,Bash,Write,Edit" : "Read,Glob,Grep,Bash"}${context.task.web ? ",WebSearch,WebFetch" : ""}`;
     const sandbox = sandboxed ? { sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
       // No network from Bash, matching Codex's sandbox (measured: YOLO otherwise auto-approved outbound requests).
       network: { allowedDomains: [], strictAllowlist: true }, ...(!yolo ? { filesystem: { denyWrite: [context.task.cwd] } } : {}) } } : {};
@@ -106,6 +110,9 @@ export class ClaudeAdapter implements RuntimeAdapter {
         if (message.type === "result") {
           if (receivedResult) throw new Error("Claude returned duplicate results");
           receivedResult = true;
+          // Close input now: a later message would open a second turn.
+          try { context.registerControls?.(undefined); } catch { /* observer only */ }
+          if (!child.child.stdin.destroyed) child.child.stdin.end();
           const usage = message.usage;
           if (usage && typeof usage === "object") {
             const read = Number(usage.cache_read_input_tokens ?? 0), created = Number(usage.cache_creation_input_tokens ?? 0);
@@ -127,9 +134,14 @@ export class ClaudeAdapter implements RuntimeAdapter {
       };
       void child.closed.then(({ code }) => reject(new Error(`Claude exited before a result (${code}): ${child.stderr}`)));
       child.send({ type: "user", message: { role: "user", content: context.prompt }, parent_tool_use_id: null, session_id: "" });
-      child.child.stdin.end();
+      context.registerControls?.({ steer: async (text) => {
+        context.signal.throwIfAborted();
+        if (receivedResult || child.child.stdin.destroyed || child.child.stdin.writableEnded) throw new Error("Claude turn is no longer steerable");
+        child.send({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null, session_id: sessionId ?? "" });
+      } });
       return await result;
     } finally {
+      try { context.registerControls?.(undefined); } catch { /* A faulty host callback cannot prevent owned cleanup. */ }
       try {
         await runtime?.stop();
         if (runtime?.failure) throw runtime.failure;
