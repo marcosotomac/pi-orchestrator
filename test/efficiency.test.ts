@@ -116,3 +116,34 @@ test("a long-lived host wakes the model once per batch with the undelivered resu
     assert.equal(sent.length, 1, "no second message for a waited task");
   } finally { await service?.close(); }
 });
+
+test("batches are per agent run: a slow task from an earlier run does not hold back a later, faster batch", async () => {
+  let service: Service | undefined;
+  const tools = new Map<string, any>();
+  const handlers = new Map<string, () => void>();
+  const sent: any[] = [];
+  const gates = new Map<string, () => void>();
+  const fake = { registerMessageRenderer() {}, appendEntry() {}, sendUserMessage() {}, registerCommand() {},
+    on(name: string, handler: () => void) { handlers.set(name, handler); },
+    sendMessage(message: any) { sent.push(message); }, registerTool(tool: any) { tools.set(tool.name, tool); },
+  } as unknown as ExtensionAPI;
+  createOrchestratorExtension(async (options) => {
+    service = await createService(options, { codex: { capabilities, run: async (ctx) => { await new Promise<void>((resolve) => gates.set(ctx.prompt, resolve)); return `answer for ${ctx.prompt}`; } } });
+    return service;
+  })(fake);
+  const ctx = { cwd: process.cwd(), mode: "rpc", ui: {} } as unknown as ExtensionCommandContext;
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 400));
+  try {
+    handlers.get("agent_start")!();
+    const slow = (await tools.get("orchestrator_delegate").execute("s", { engine: "codex", prompt: "slow" }, undefined, undefined, ctx)).details as TaskView;
+    handlers.get("agent_start")!();
+    const fast = (await tools.get("orchestrator_delegate").execute("f", { engine: "codex", prompt: "fast" }, undefined, undefined, ctx)).details as TaskView;
+    while (gates.size < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+    gates.get("fast")!(); await service!.core.wait(null, fast.id); await settle();
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0].details.batch.map((task: TaskView) => task.id), [fast.id], "only the finished run's batch");
+    gates.get("slow")!(); await service!.core.wait(null, slow.id); await settle();
+    assert.equal(sent.length, 2);
+    assert.deepEqual(sent[1].details.batch.map((task: TaskView) => task.id), [slow.id]);
+  } finally { await service?.close(); }
+});

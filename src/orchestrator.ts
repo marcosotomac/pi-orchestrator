@@ -13,6 +13,7 @@ export const MAX_RESULT = 20_000;
 export const PARTIAL_NOTE = "\n\n[Resultado parcial: la tarea no terminó; este es el último texto que el runtime produjo antes de cortarse.]";
 /** Soft deadline: at this fraction of the task timeout, steerable runtimes are asked to answer now. */
 export const SOFT_DEADLINE = 0.85;
+export const ACTIVITY_PERSIST_MS = 5_000;
 export const WRAP_UP_TEXT = "Time limit almost reached. Stop exploring now and give your final answer with what you already have. State clearly what you could not verify or finish.";
 export const TRUNCATION_NOTE = `\n\n[Resultado truncado por el orquestador: superaba ${MAX_RESULT} caracteres; se publican los primeros. Pide al runtime un resumen o que escriba el detalle en un archivo.]`;
 
@@ -42,6 +43,7 @@ interface Entry {
   prompt: string;
   /** Latest runtime answer text; published as partialResult only if the attempt does not complete. */
   partial?: string;
+  activityPersistedAt?: number;
 }
 
 export interface OrchestratorOptions {
@@ -324,7 +326,13 @@ export class Orchestrator {
           if (entry.controller.signal.aborted || isTerminal(entry.view)) return;
           entry.view.lastActivity = this.redact(detail, token).slice(0, 120);
           entry.view.activityAt = new Date().toISOString();
-          this.emit("activity", entry, entry.view.lastActivity);
+          // A durable rewrite (two fsyncs) per tool call is pure I/O (measured: 378
+          // activity events in one session). Persist at most every 5 s per task;
+          // the first one and the settle checkpoint are always written.
+          const now = Date.now();
+          const persist = entry.activityPersistedAt === undefined || now - entry.activityPersistedAt >= ACTIVITY_PERSIST_MS;
+          if (persist) entry.activityPersistedAt = now;
+          this.emit("activity", entry, entry.view.lastActivity, persist);
         },
       });
       if (typeof output !== "string" || !output.trim()) throw new Error("Runtime returned no result");

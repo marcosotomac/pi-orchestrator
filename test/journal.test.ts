@@ -186,7 +186,8 @@ test("filesystem write failure cannot prevent real Node runtime cleanup or bridg
     await started;
     // Preserve the last good checkpoint, but make further writes fail deterministically (even as root).
     renameSync(f.directory, join(f.root, "last-good")); writeFileSync(f.directory, "not a directory", { mode: 0o600 });
-    context.activity("trip real filesystem failure");
+    // Activity is throttled to one durable write per 5 s; a session report always persists.
+    context.session("trip-real-filesystem-failure");
     const result = await service.core.wait(null, root.id);
     assert.equal(result.state, "cancelled"); assert.ok(result.runtimeProcess?.exitedAt);
     assert.match(result.error!, /Durable state write failed/);
@@ -413,4 +414,41 @@ test("projection strips extra authority fields and redaction cannot make bounded
     assert.ok(!text.includes("never persist"));
     assert.match(saved.tasks[0]!.title, /REDACTED/);
   } finally { f.clean(); }
+});
+
+test("retention deletes only old closed runs; unclosed, invalid and current runs survive", async () => {
+  const { mkdtemp, rm, writeFile, readdir, utimes } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  const { RunStore, RunJournal } = await import("../src/journal.ts");
+  const directory = await mkdtemp(join(tmpdir(), "pi-orchestrator-retention-"));
+  try {
+    const store = new RunStore(join(directory, "state"));
+    const closed = Array.from({ length: 4 }, () => { const run = new RunJournal(store, process.cwd()); run.close(); return run.runId; });
+    const open = new RunJournal(store, process.cwd()).runId; // never closed: may be live elsewhere
+    const bogus = "00000000-0000-4000-8000-000000000000";
+    await writeFile(join(directory, "state", `${bogus}.json`), "{not json", { mode: 0o600 });
+    // Oldest first: the open run and the invalid file are older than every closed run.
+    let t = Date.now() / 1000 - 1000;
+    for (const id of [open, bogus, ...closed]) await utimes(join(directory, "state", `${id}.json`), t, t++);
+    const current = closed.at(-1)!;
+    assert.equal(store.prune(1, current), 3, "three older closed runs deleted");
+    const left = (await readdir(join(directory, "state"))).sort();
+    assert.deepEqual(left, [open, bogus, current].map((id) => `${id}.json`).sort());
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("activity reaches the durable checkpoint at most every 5 s per task; the first and the settle always do", async () => {
+  const writes: (string | undefined)[] = [];
+  let ctx!: RuntimeContext; let finish!: () => void;
+  const core = coreWith(async (context) => { ctx = context; await new Promise<void>((resolve) => { finish = resolve; }); return "done"; }, (tasks) => { writes.push(tasks[0]?.lastActivity); });
+  try {
+    const root = core.delegate(null, "codex", "parent", "parent");
+    while (!ctx) await delay(1);
+    const before = writes.length;
+    for (let i = 0; i < 50; i++) ctx.activity(`tool ${i}`);
+    assert.deepEqual(writes.slice(before), ["tool 0"], "a burst of 50 tool calls is one write");
+    finish();
+    await core.wait(null, root.id);
+    assert.equal(writes.at(-1), "tool 49", "the settle checkpoint carries the latest activity");
+  } finally { await core.close(); }
 });

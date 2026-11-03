@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -51,11 +53,14 @@ const usage = "/orch [panel] | start codex|claude|antigravity PROMPT | run codex
 const demoPrompt = "You must delegate exactly one task to the claude engine using the pi_orchestrator MCP delegate tool: compute 17 * 19 and explain in one sentence. Use requestKey 'arithmetic-review'. Wait for the task to complete with the MCP wait tool. Return its task id, status and answer. Do not solve it yourself or launch other workers.";
 
 /** Injection is only for local tests. Import/registration never opens sockets or starts processes. */
-export function createOrchestratorExtension(serviceFactory: typeof createService = createService) {
+export function createOrchestratorExtension(serviceFactory: typeof createService = createService, defaults: { stateDirectory?: string } = {}) {
   return function orchestratorExtension(pi: ExtensionAPI) {
     let service: Promise<Awaited<ReturnType<typeof createService>>> | undefined;
     let active = true;
-    const stateDirectory = process.env.PI_ORCHESTRATOR_STATE_DIR?.trim() || undefined;
+    // History is on by default for the real extension (a private directory under
+    // ~/.pi/agent); PI_ORCHESTRATOR_STATE_DIR overrides it and "off" disables it.
+    const configuredState = process.env.PI_ORCHESTRATOR_STATE_DIR?.trim();
+    const stateDirectory = configuredState === "off" ? undefined : configuredState || defaults.stateDirectory;
     let latestContext: ExtensionContext | undefined;
     const snapshots = new Map<string, TaskView>();
     const attention = new Map<string, Attention>();
@@ -63,7 +68,9 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
     const tasks = () => [...snapshots.values()];
     // Tasks the model delegated itself: it receives their result through
     // orchestrator_wait, so the settled notice must not repeat it in context.
-    const toolTasks = new Set<string>();
+    // Model-delegated root tasks → the agent run that delegated them (its batch).
+    const toolTasks = new Map<string, number>();
+    let agentRun = 0;
     // `content` is the compact model view (results sent once per task);
     // `details` keeps the full TaskView for the TUI renderers.
     const ledger = new DeliveryLedger();
@@ -85,10 +92,19 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
     const flush = () => {
       flushTimer = undefined;
       if (!active) return;
-      const batch = [...toolTasks].map((id) => snapshots.get(id)).filter((task): task is TaskView => Boolean(task));
-      if (batch.some((task) => !isTerminal(task))) return;
-      const pending = batch.filter((task) => !waiting.has(task.id) && !ledger.has(task.id));
-      for (const task of batch) if (!waiting.has(task.id)) toolTasks.delete(task.id);
+      // A batch is what one agent run delegated: a long task from an earlier run
+      // must not hold back the results of a later, faster batch.
+      const batches = new Map<number, TaskView[]>();
+      for (const [id, run] of toolTasks) {
+        const task = snapshots.get(id);
+        if (task) batches.set(run, [...(batches.get(run) ?? []), task]);
+      }
+      const pending: TaskView[] = [];
+      for (const batch of batches.values()) {
+        if (batch.some((task) => !isTerminal(task))) continue;
+        pending.push(...batch.filter((task) => !waiting.has(task.id) && !ledger.has(task.id)));
+        for (const task of batch) if (!waiting.has(task.id)) toolTasks.delete(task.id);
+      }
       if (!pending.length || !deferred()) return;
       for (const task of pending) ledger.mark(task.id);
       const failed = pending.filter((task) => task.state !== "completed").length;
@@ -204,6 +220,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
     };
 
     pi.on("session_start", () => { active = true; });
+    pi.on("agent_start", () => { agentRun++; });
     pi.on("session_shutdown", async () => {
       active = false;
       const previous = service;
@@ -322,7 +339,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         const { core } = await get(ctx);
         signal?.throwIfAborted();
         const task = core.delegate(null, params.engine, params.prompt, params.requestKey ?? callId, undefined, { ...(params.model ? { model: params.model } : {}), ...(params.thinking ? { thinking: params.thinking } : {}) }, params.permissionMode);
-        toolTasks.add(task.id);
+        if (!toolTasks.has(task.id)) toolTasks.set(task.id, agentRun);
         latestContext = ctx;
         return reply(task, { ...once(task), next: deferred() ? NEXT_DEFERRED : NEXT_BLOCKING });
       },
@@ -492,7 +509,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
           }
         }
         if (verb === "history" || verb === "inspect" || verb === "reconcile") {
-          if (!stateDirectory) { message({ storage: "Persistencia desactivada. Inicia Pi con PI_ORCHESTRATOR_STATE_DIR apuntando a un directorio privado absoluto. El historial no crea ni adopta runtimes." }); return; }
+          if (!stateDirectory) { message({ storage: "Persistencia desactivada (PI_ORCHESTRATOR_STATE_DIR=off). Quita esa variable o apúntala a un directorio privado absoluto. El historial no crea ni adopta runtimes." }); return; }
           const store = new RunStore(stateDirectory);
           if (verb === "history") { message({ history: store.history((await service)?.journal?.runId) }); return; }
           if (!argument) throw new Error("Indica el ID de un run o un prefijo único");
@@ -547,4 +564,4 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
   };
 }
 
-export default createOrchestratorExtension();
+export default createOrchestratorExtension(createService, { stateDirectory: join(homedir(), ".pi", "agent", "orchestrator-state") });

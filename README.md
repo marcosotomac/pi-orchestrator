@@ -274,6 +274,17 @@ PI_ORCHESTRATOR_CODEX_MODEL=<id> PI_ORCHESTRATOR_CLAUDE_MODEL=<id> npm run smoke
 
 Sin variables se conservan los modelos predeterminados de cada runtime. Codex recibe esfuerzo de razonamiento `low`. Claude tiene un máximo de 12 turnos y la opción de presupuesto API de USD 1; **esa opción no es un límite garantizado de consumo para suscripciones OAuth**. No hay un límite monetario duro para Codex. El límite general es el plazo de ejecución.
 
+## Verificación
+
+- `npm run verify`: compilador, batería completa y arnés PTY con Pi real (sin cuota).
+- `npm run verify:live`: lo anterior más `scripts/live-matrix.ts`, que ejecuta los tres motores solos y anidados en paralelo (consume cuota; sale con código 1 si un caso falla).
+
+## Historial por defecto
+
+La extensión guarda el historial en `~/.pi/agent/orchestrator-state` (directorio 0700, archivos 0600). `PI_ORCHESTRATOR_STATE_DIR` elige otro directorio y `PI_ORCHESTRATOR_STATE_DIR=off` lo desactiva. Retención: se conservan los 100 runs más recientes; solo se borran runs más antiguos con cierre registrado y archivo válido (nunca runs sin cierre, que podrían seguir vivos, ni archivos inválidos). La actividad se escribe en disco como mucho cada 5 s por tarea (medido en una tarea real de Codex: 18 → 11 escrituras); el cierre de cada tarea siempre se escribe.
+
+Los lotes se agrupan por ejecución del agente: una tarea larga de una ejecución anterior no retrasa los resultados de un lote posterior más rápido.
+
 ## Rendimiento medido
 
 `npm run bench:live -- ETIQUETA fanout|trivial [N]` (con `BENCH_MODE=rpc|json`) ejecuta el modelo principal real de Pi y los motores reales sobre un repo con tres errores plantados; consume cuota. Resultados del 2026-11-03 con `gpt-6.1-sol` como modelo principal (tres tareas en paralelo: 2 Claude y 1 Codex):

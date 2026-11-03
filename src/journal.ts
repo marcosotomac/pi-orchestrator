@@ -144,6 +144,24 @@ export class RunStore {
     }
     return { runs: runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt)), unavailable, omitted: Math.max(0, names.length - candidates.length) };
   }
+  /**
+   * Retention: keeps the newest `keep` archives and deletes only older ones that
+   * validate and record a closure. Unclosed runs (possibly live elsewhere),
+   * invalid files and the current run are never touched. Returns deleted count.
+   */
+  prune(keep: number, currentRunId?: string): number {
+    if (!Number.isSafeInteger(keep) || keep < 1 || !this.checkRoot(false)) return 0;
+    const names = readdirSync(this.directory).filter((name) => archiveName.test(name)).map((name) => {
+      try { return { name, modified: lstatSync(join(this.directory, name)).mtimeMs }; } catch { return { name, modified: Infinity }; }
+    }).sort((a, b) => b.modified - a.modified);
+    let deleted = 0;
+    for (const { name } of names.slice(keep)) {
+      const runId = name.slice(0, -5);
+      if (runId === currentRunId) continue;
+      try { if (this.read(runId).closedAt) { unlinkSync(join(this.directory, name)); deleted++; } } catch { /* invalid or unreadable: never deleted */ }
+    }
+    return deleted;
+  }
   resolve(reference: string): string {
     if (id.safeParse(reference).success) return reference;
     if (!/^[0-9a-f-]{8,35}$/.test(reference) || !this.checkRoot(false)) throw new Error("Usa el ID completo del run o un prefijo único de al menos ocho caracteres");

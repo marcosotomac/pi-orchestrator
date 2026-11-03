@@ -8,6 +8,8 @@ import { RunJournal, RunStore } from "./journal.ts";
 export interface ServiceOptions extends Omit<OrchestratorOptions, "adapters" | "checkpoint"> {
   onBridgeAudit?: (event: BridgeAudit) => void;
   stateDirectory?: string;
+  /** Archives kept by retention (closed runs beyond this are deleted). */
+  keepRuns?: number;
 }
 export interface Service {
   core: Orchestrator;
@@ -19,7 +21,12 @@ export async function createService(options: ServiceOptions, adapters: Orchestra
   let journal: RunJournal | undefined;
   const core = new Orchestrator({ ...options, adapters, checkpoint: (tasks) => journal?.checkpoint(tasks) });
   // Failure here opens no bridge and launches no runtime. Persistence is explicitly opt-in.
-  if (options.stateDirectory) journal = new RunJournal(new RunStore(options.stateDirectory), core.cwd);
+  if (options.stateDirectory) {
+    const store = new RunStore(options.stateDirectory);
+    journal = new RunJournal(store, core.cwd);
+    // Default-on persistence needs bounded disk use; retention never blocks startup.
+    try { store.prune(options.keepRuns ?? 100, journal.runId); } catch { /* retention is best effort */ }
+  }
   let bridge: Awaited<ReturnType<typeof startMcpBridge>>;
   try { bridge = await startMcpBridge(core, options.onBridgeAudit); }
   catch (error) { journal?.close(); throw error; }
