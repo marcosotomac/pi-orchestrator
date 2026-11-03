@@ -27,9 +27,9 @@ function sessionServer(core: Orchestrator, caller: string, authorized: () => boo
     inputSchema: { taskId: z.string() },
   }, guarded(({ taskId }: { taskId: string }) => core.status(caller, taskId)));
   server.registerTool("wait", {
-    description: "Wait up to 30 seconds for a descendant result. If still running, call again. A timeout is not task failure.",
-    inputSchema: { taskId: z.string(), timeoutMs: z.number().int().min(1).max(60_000).optional() },
-  }, guarded(({ taskId, timeoutMs }: { taskId: string; timeoutMs?: number }, signal) => core.wait(caller, taskId, timeoutMs, signal)));
+    description: "Block until a descendant settles or timeoutMs passes (default 300000 = 5 min, max 600000; Antigravity callers: default 30000, max 60000). Each call costs you a turn, so prefer the default over short polls. If still running, call again. A timeout is not task failure.",
+    inputSchema: { taskId: z.string(), timeoutMs: z.number().int().min(1).max(600_000).optional() },
+  }, guarded(({ taskId, timeoutMs }: { taskId: string; timeoutMs?: number }, signal) => core.wait(caller, taskId, timeoutMs ?? core.waitWindow(caller).defaultMs, signal)));
   server.registerTool("cancel", {
     description: "Request cancellation of an owned descendant and its children. A cancelled state confirms cleanup; failed with a cleanup error does not confirm process exit.",
     inputSchema: { taskId: z.string() },
@@ -100,6 +100,7 @@ export async function startMcpBridge(core: Orchestrator, onAudit?: (event: Bridg
     }
   };
   const http = createServer((request, response) => { void handle(request, response); });
+  // Bounds receiving a request, not a long-poll response (measured on Node 26).
   http.requestTimeout = 70_000;
   http.headersTimeout = 10_000;
   const closeHttp = () => new Promise<void>((resolve) => {

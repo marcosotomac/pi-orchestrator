@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, readFile, stat, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { ClaudeAdapter } from "../src/adapters/claude.ts";
+import { ClaudeAdapter, claudeBudget } from "../src/adapters/claude.ts";
 import { RuntimeProcess } from "../src/adapters/process.ts";
 import { RuntimeCleanupError, type RuntimeProcessInfo, type TaskView } from "../src/types.ts";
 
@@ -41,6 +41,7 @@ assert.equal(JSON.parse(option('--settings')).disableAllHooks,true);
 assert.ok(!args.some(a=>a.includes('fixture-private-token')||a.includes('Bearer ')));
 const configPath=option('--mcp-config'), config=JSON.parse(fs.readFileSync(configPath,'utf8'));
 assert.equal(config.mcpServers.pi_orchestrator.headers.Authorization,'Bearer fixture-private-token');
+assert.equal(config.mcpServers.pi_orchestrator.timeout,660000,'long MCP waits are not cut by the client');
 assert.equal(fs.statSync(configPath).mode & 0o777,0o600);
 assert.equal(fs.statSync(path.dirname(configPath)).mode & 0o777,0o700);
 fs.writeFileSync(${JSON.stringify(marker)},configPath,{mode:0o600});
@@ -60,6 +61,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
  const rows=[];
  if(mode!=='no-init') rows.push(init);
  if(mode==='duplicate-init') rows.push(init);
+ if(mode==='native-failure') rows.push({type:'assistant',session_id:'fixture-session',message:{content:[{type:'text',text:'half done'},{type:'tool_use',name:'Read'}]}});
  if(mode==='invalid-content') rows.push({type:'assistant',session_id:'fixture-session',message:{content:{}}});
  if(mode==='control-request') rows.push({type:'control_request',request_id:'question',request:{subtype:'can_use_tool'}});
  rows.push(result);
@@ -77,6 +79,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
     const observations: RuntimeProcessInfo[] = [];
     const sessions: string[] = [];
     const usages: unknown[] = [];
+    const partials: string[] = [];
     const controller = new AbortController();
     const watchdog = setTimeout(() => controller.abort(new Error("Fixture protocol deadline")), 15_000);
     const task: TaskView = { id: "task", title: "fixture", attemptId: "attempt", parentId: null, engine: "claude", depth: 1, state: "running", cwd, createdAt: new Date().toISOString() };
@@ -85,14 +88,17 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
       if (mode === "thinking") task.selection = { model: "sonnet", thinking: "high" };
       const running = new ClaudeAdapter(executable).run({ task, prompt: "fixture prompt", signal: controller.signal,
         mcp: { url: "http://127.0.0.1:12345/mcp", token: "fixture-private-token" },
-        session: (id) => { sessions.push(id); }, activity() {}, usage: (value) => { usages.push(value); }, process: (info) => {
+        session: (id) => { sessions.push(id); }, activity() {}, usage: (value) => { usages.push(value); }, partial: (text) => { partials.push(text); }, process: (info) => {
           observations.push(info);
           if (mode === "early-abort" && !info.exitedAt) controller.abort(new Error("early fixture abort"));
           if (mode === "throwing-observer") throw new Error("fixture observer failure");
         },
       });
-      if (expected) await assert.rejects(running, expected);
-      else {
+      if (expected) {
+        await assert.rejects(running, expected);
+        // A turn/budget limit keeps the text Claude already wrote for the core to publish.
+        if (mode === "native-failure") assert.deepEqual(partials, ["half done"]);
+      } else {
         const text = await running;
         if (mode === "denied-tool") assert.match(text, /^fixture result\n\n\[Aviso del orquestador: Claude intentó herramientas no autorizadas \(Write\)/);
         else assert.equal(text, "fixture result");
@@ -108,3 +114,9 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
     } finally { clearTimeout(watchdog); await rm(cwd, { recursive: true, force: true }); }
   });
 }
+
+test("the Claude spend cap is configurable and fails closed", () => {
+  assert.equal(claudeBudget({}), "1.00");
+  assert.equal(claudeBudget({ PI_ORCHESTRATOR_CLAUDE_MAX_BUDGET_USD: "2.5" }), "2.50");
+  for (const bad of ["0", "-1", "1e3", "abc", "101", "1.234"]) assert.throws(() => claudeBudget({ PI_ORCHESTRATOR_CLAUDE_MAX_BUDGET_USD: bad }), /Invalid/);
+});

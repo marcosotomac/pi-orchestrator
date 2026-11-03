@@ -165,8 +165,8 @@ En el panel:
 Para delegar desde el modelo principal de Pi están disponibles:
 
 - `orchestrator_delegate`: inicia una tarea; devuelve identificador, no resultado.
-- `orchestrator_status`: lista tareas o consulta una concreta.
-- `orchestrator_wait`: espera hasta 30 segundos (máximo 60); repetir si sigue en ejecución.
+- `orchestrator_status`: lista tareas (sin el texto de los resultados) o consulta una concreta con su resultado completo.
+- `orchestrator_wait`: espera una o varias tareas (`taskIds`), 5 min por defecto y 10 como máximo; repetir si siguen en ejecución. Cada resultado se envía al modelo **una sola vez**; las consultas posteriores devuelven una referencia.
 - `orchestrator_cancel`: cancela el árbol y espera la limpieza de los runtimes.
 
 Ejemplo de petición al modelo de Pi:
@@ -307,19 +307,22 @@ Las herramientas MCP son `delegate`, `status`, `wait` y `cancel`. La identidad d
 | Límite | Valor |
 | --- | --- |
 | Profundidad | 2 runtimes por debajo de Pi |
-| Concurrencia | 3, incluyendo padres que esperan |
+| Concurrencia | 4 en la extensión (`PI_ORCHESTRATOR_MAX_CONCURRENT`), incluyendo padres que esperan; con la cola justa una plaza queda reservada para subtareas, así que corren 3 raíces a la vez. El núcleo como librería mantiene 3 |
+| Cola de raíces | `fair` por defecto en la extensión (`PI_ORCHESTRATOR_QUEUE=reject` vuelve al rechazo); las tareas que exceden la capacidad esperan en cola |
 | Tareas por sesión del núcleo | 32, incluyendo terminadas (`PI_ORCHESTRATOR_MAX_TASKS`); es un freno contra delegación desbocada |
-| Plazo por intento | 15 minutos (`PI_ORCHESTRATOR_TASK_TIMEOUT_MS`); al vencer un padre se cancelan sus descendientes |
+| Plazo por intento | 15 minutos (`PI_ORCHESTRATOR_TASK_TIMEOUT_MS`); al 85 % se pide a Codex (vía steer) que cierre y responda ya; al vencer se cancela el árbol |
+| Resultado parcial | si una tarea falla o se cancela (plazo, turnos, presupuesto), su último texto se publica como `partialResult` marcado como parcial; nunca cuenta como completada |
+| Permisos y preguntas pendientes | 5 min en la extensión (`PI_ORCHESTRATOR_INTERACTION_TIMEOUT_MS`); después se deniegan |
 | Prompt | 32 000 caracteres |
 | Resultado completo, después de redactar | 20 000 caracteres; el exceso se **trunca con un aviso explícito** en vez de descartar el trabajo |
-| Espera del host (`orchestrator_wait`) | 5 min por defecto, máx. 10 min; acepta `taskIds` para esperar varias tareas en una llamada. Las esperas MCP anidadas siguen en máx. 60 s (transporte HTTP de 70 s) |
+| Espera del host (`orchestrator_wait`) | 5 min por defecto, máx. 10 min; acepta `taskIds` para esperar varias tareas en una llamada. Las esperas MCP anidadas de Codex y Claude: 5 min por defecto, máx. 10 (sus clientes MCP se configuran con 660 s); Antigravity mantiene 30 s / 60 s porque el límite de su cliente no está verificado |
 | Esfuerzo de Codex sin `thinking` explícito | `medium` (`PI_ORCHESTRATOR_CODEX_DEFAULT_THINKING`); nunca se hereda el `model_reasoning_effort` global del usuario |
-| Turnos de Claude | 40 (`PI_ORCHESTRATOR_CLAUDE_MAX_TURNS`, 1–500); presupuesto `--max-budget-usd 1.00` sin cambios |
+| Turnos de Claude | 40 (`PI_ORCHESTRATOR_CLAUDE_MAX_TURNS`, 1–500); presupuesto `--max-budget-usd` 1.00 por tarea (`PI_ORCHESTRATOR_CLAUDE_MAX_BUDGET_USD`, hasta 100) |
 | Notificaciones | `PI_ORCHESTRATOR_NOTIFY=desktop` (por defecto: aviso en Pi y notificación de escritorio OSC 777, compatible con Ghostty), `bell` o `off`; al terminar una tarea raíz o cuando un motor pide permiso o respuesta |
 
 **Panel (`/orch`).** Las tareas se ordenan por urgencia (te necesita › fallida › atascada › en curso › lista), sin IDs técnicos. Muestra tiempo, tokens reportados por el motor, subtareas activas y "sin actividad hace N" (tras 3 min sin actividad observada por el host). Lo que reporta el motor se etiqueta como "motor: …" y nunca se presenta como una fase verificada. Teclas, solo si la tarea las admite: `s` redirigir (Codex en curso), `r` reanudar (Antigravity), `R` reintentar (tarea raíz terminada; YOLO vuelve a pedir confirmación), `e` editor, `i` insertar en el chat, `y` copiar, `c` cancelar árbol, `d` detalles, `f` filtro. El widget se reduce a una línea cuando no queda trabajo activo. Los permisos se muestran con el comando y las rutas destacados, no como JSON.
 
-No hay cola: sobrepasar límites produce un error explícito. Un padre que necesite capacidad para hijos debe conservar una plaza disponible. La cadena de tres runtimes `Pi → Codex → Claude → Antigravity` requiere aumentar la profundidad predeterminada; esa cadena de tres runtimes no se ha probado.
+Con la cola justa por defecto, las raíces que exceden la capacidad esperan; las subtareas siguen rechazándose si no queda plaza (no pueden esperar detrás de sus ancestros). Un padre que necesite capacidad para hijos debe conservar una plaza disponible. La cadena de tres runtimes `Pi → Codex → Claude → Antigravity` requiere aumentar la profundidad predeterminada; esa cadena de tres runtimes no se ha probado.
 
 ## Seguridad y límites reales
 
@@ -404,7 +407,7 @@ Cobertura local: políticas, propagación desde el tool, fixtures de los tres mo
 - `/orch steer TASK TEXTO`: solo Codex y su turno vivo. Correlaciona hilo/turno esperado; un ACK no demuestra obediencia. `artifacts/native-steer-mqHjxW/report.json` sí verifica que el resultado contiene una marca enviada exclusivamente por steer.
 - `/orch resume TASK TEXTO`: solo Antigravity, desde una tarea completada con limpieza confirmada en **el coordinador todavía vivo**. Crea tarea/intento/proceso/credencial nuevos y conserva la sesión nativa; exclusión por sesión evita continuaciones simultáneas. No importa archivos, no adopta PIDs y no reenvía transcripts. La sesión puede contener continuaciones anteriores; no es un fork del estado histórico del origen. `artifacts/native-resume-bRLi0Z/report.json` verifica recuerdo de una marca ausente del segundo prompt, misma sesión e intentos distintos.
 - En modo restringido, Antigravity traslada solicitudes adicionales a confirmación/selección humana en Pi. Permisos adicionales solo ofrecen `allow_once`, nunca aprobación persistente. Sin TUI, al expirar/cancelar/completar o sin handler, se deniega. Texto externo no confiable y detalles redactados; las respuestas tardías pierden autoridad. Codex/Claude no ganan permisos interactivos.
-- `PI_ORCHESTRATOR_QUEUE=fair` activa cola limitada de raíces, FIFO por motor y round-robin entre motores (no equidad multiusuario). Por defecto sigue `reject`. `PI_ORCHESTRATOR_MAX_QUEUED` y `PI_ORCHESTRATOR_RESERVED_CHILD_SLOTS` ajustan límites; los hijos rechazan saturación en vez de esperar detrás de sus ancestros.
+- `PI_ORCHESTRATOR_QUEUE=fair` es el valor por defecto de la extensión: cola limitada de raíces, FIFO por motor y round-robin entre motores (no equidad multiusuario). `reject` restaura el rechazo inmediato. `PI_ORCHESTRATOR_MAX_QUEUED` y `PI_ORCHESTRATOR_RESERVED_CHILD_SLOTS` ajustan límites; los hijos rechazan saturación en vez de esperar detrás de sus ancestros.
 - `PI_ORCHESTRATOR_MAX_RUNTIME_MS` limita la suma monotónica de milisegundos ocupados por slots de runtime, incluidos padres esperando. Al agotarse cierra admisión y cancela activos/pendientes; el cleanup puede exceder el límite. No mide CPU, tokens ni facturación. `/orch usage` informa consumo y coste monetario no disponible.
 - También se validan `PI_ORCHESTRATOR_MAX_CONCURRENT`, `MAX_TASKS`, `MAX_DEPTH` e `INTERACTION_TIMEOUT_MS` con el mismo prefijo completo.
 

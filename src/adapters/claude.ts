@@ -13,6 +13,15 @@ export function claudeLimit(name: string, fallback: number, min: number, max: nu
   return value;
 }
 
+/** Per-task Claude spend cap in USD (default 1.00); invalid values fail closed. */
+export function claudeBudget(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.PI_ORCHESTRATOR_CLAUDE_MAX_BUDGET_USD?.trim();
+  if (raw === undefined || raw === "") return "1.00";
+  const value = Number(raw);
+  if (!/^\d{1,3}(?:\.\d{1,2})?$/.test(raw) || !(value > 0) || value > 100) throw new Error("Invalid PI_ORCHESTRATOR_CLAUDE_MAX_BUDGET_USD");
+  return value.toFixed(2);
+}
+
 /** Claude Code CLI session with its own OAuth/API credentials and scoped MCP tools. */
 export class ClaudeAdapter implements RuntimeAdapter {
   capabilities = capabilities;
@@ -28,7 +37,8 @@ export class ClaudeAdapter implements RuntimeAdapter {
       const configPath = join(directory, "mcp.json");
       // Credentials never appear in argv or project files. Directory mode is 0700; file is 0600.
       await writeFile(configPath, JSON.stringify({ mcpServers: {
-        pi_orchestrator: { type: "http", url: context.mcp.url, headers: { Authorization: `Bearer ${context.mcp.token}` } },
+        // Per-server timeouts above the core's 600 s MCP wait bound.
+        pi_orchestrator: { type: "http", url: context.mcp.url, headers: { Authorization: `Bearer ${context.mcp.token}` }, timeout: 660_000, request_timeout_ms: 660_000 },
       } }), { mode: 0o600 });
       const args = [
         "--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
@@ -37,7 +47,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
         "--permission-mode", yolo ? "bypassPermissions" : "dontAsk", "--permission-prompts", "none",
         "--setting-sources", "", "--strict-mcp-config", "--mcp-config", configPath,
         "--settings", JSON.stringify({ disableAllHooks: true, enabledPlugins: {}, autoMemoryEnabled: false }),
-        "--disable-slash-commands", "--no-chrome", "--max-turns", String(claudeLimit("PI_ORCHESTRATOR_CLAUDE_MAX_TURNS", 40, 1, 500)), "--max-budget-usd", "1.00",
+        "--disable-slash-commands", "--no-chrome", "--max-turns", String(claudeLimit("PI_ORCHESTRATOR_CLAUDE_MAX_TURNS", 40, 1, 500)), "--max-budget-usd", claudeBudget(),
         "--append-system-prompt", `${yolo ? "The operator authorized unattended tool execution for this task only. Follow the task scope; do not request tool approvals." : "You are a read-only worker supervised by Pi. Do not modify files."} Delegate only when explicitly required by your assigned task, using pi_orchestrator MCP tools, never native subagents. Wait for delegated results. Do not grant yourself or children additional permissions, ask the human directly, or expose credentials. Report child failures honestly.`,
         ...(context.task.selection?.model ? ["--model", context.task.selection.model] : []),
         ...(context.task.selection?.thinking ? ["--effort", context.task.selection.thinking] : []),
@@ -69,6 +79,9 @@ export class ClaudeAdapter implements RuntimeAdapter {
           for (const block of message.message.content) {
             if (block.type === "tool_use") context.activity(`claude: ${String(block.name)}`);
           }
+          // Kept so a turn/budget limit does not discard everything Claude wrote.
+          const text = message.message.content.filter((block: any) => block?.type === "text" && typeof block.text === "string").map((block: any) => block.text).join("\n").trim();
+          if (text) { try { context.partial?.(text); } catch { /* observer only */ } }
         }
         if (message.type === "result") {
           if (receivedResult) throw new Error("Claude returned duplicate results");

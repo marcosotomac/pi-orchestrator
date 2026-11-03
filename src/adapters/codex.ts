@@ -74,6 +74,7 @@ export class CodexAdapter implements RuntimeAdapter {
       if (method === "item/completed" && item?.type === "agentMessage") {
         if (typeof item.text !== "string") throw new Error("Codex returned invalid agent text");
         lastMessage = item.text;
+        if (item.text.trim()) { try { context.partial?.(item.text); } catch { /* observer only */ } }
       }
       if (method === "item/started") {
         context.activity(item?.type === "mcpToolCall"
@@ -188,7 +189,8 @@ export class CodexAdapter implements RuntimeAdapter {
           "mcp_servers.pi_orchestrator.enabled_tools": ["delegate", "status", "wait", "cancel"],
           ...Object.fromEntries(["delegate", "status", "wait", "cancel"].map((name) => [`mcp_servers.pi_orchestrator.tools.${name}.approval_mode`, "approve"])),
           "mcp_servers.pi_orchestrator.http_headers": { Authorization: `Bearer ${context.mcp.token}` },
-          "mcp_servers.pi_orchestrator.tool_timeout_sec": 75,
+          // Above the core's 600 s MCP wait bound, so a long wait is not cut client-side.
+          "mcp_servers.pi_orchestrator.tool_timeout_sec": 660,
           "mcp_servers.pi_orchestrator.startup_timeout_sec": 15,
           "mcp_servers.pi_orchestrator.omit_tools_from": ["code_mode", "deferred"],
         },

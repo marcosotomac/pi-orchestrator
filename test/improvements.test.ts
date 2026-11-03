@@ -1,0 +1,106 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { setTimeout as delay } from "node:timers/promises";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { Orchestrator, PARTIAL_NOTE, WRAP_UP_TEXT } from "../src/orchestrator.ts";
+import { productDefaults, runtimeConfiguration } from "../src/configuration.ts";
+import { createOrchestratorExtension } from "../src/extension.ts";
+import { createService, type Service } from "../src/service.ts";
+import { DELIVERED_NOTE, AVAILABLE_NOTE } from "../src/model-view.ts";
+import { taskCard, taskDetail } from "../src/presentation.ts";
+import { capabilities, type RuntimeContext, type TaskView } from "../src/types.ts";
+
+test("product defaults queue a root fan-out instead of rejecting it, and env still wins", async () => {
+  assert.deepEqual(productDefaults, { queuePolicy: "fair", maxConcurrent: 4, interactionTimeoutMs: 300_000 });
+  assert.equal({ ...productDefaults, ...runtimeConfiguration({ PI_ORCHESTRATOR_QUEUE: "reject" }) }.queuePolicy, "reject");
+  const blocked = async (ctx: RuntimeContext) => { await delay(60_000, undefined, { signal: ctx.signal }); return "x"; };
+  const core = new Orchestrator({ cwd: process.cwd(), ...productDefaults, adapters: { codex: { capabilities, run: blocked } } });
+  core.attachEndpoint("http://127.0.0.1:1/mcp");
+  try {
+    const states = Array.from({ length: 5 }, (_, i) => core.delegate(null, "codex", `t${i}`, `k${i}`).state);
+    // One of four slots stays reserved for nested children: three roots run, as before.
+    assert.deepEqual(states, ["running", "running", "running", "queued", "queued"]);
+  } finally { await core.close(); }
+});
+
+test("a cut-off attempt publishes its last text as partialResult, redacted; completion never does", async () => {
+  let token = "";
+  const core = new Orchestrator({ cwd: process.cwd(), adapters: { codex: { capabilities, run: async (ctx) => {
+    token = ctx.mcp.token;
+    ctx.partial?.(`draft one ${ctx.mcp.token}`);
+    ctx.partial?.(`draft two ${ctx.mcp.token}`);
+    if (ctx.prompt === "ok") return "final";
+    throw new Error("error_max_turns");
+  } } } });
+  core.attachEndpoint("http://127.0.0.1:1/mcp");
+  try {
+    const failed = await core.wait(null, core.delegate(null, "codex", "cut", "cut").id);
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.result, undefined, "a partial is never a completion");
+    assert.ok(failed.partialResult!.startsWith("draft two [REDACTED]"));
+    assert.ok(failed.partialResult!.endsWith(PARTIAL_NOTE));
+    assert.ok(!failed.partialResult!.includes(token));
+    assert.match(taskCard(failed, true), /draft two/, "the operator sees it in the card");
+    const ok = await core.wait(null, core.delegate(null, "codex", "ok", "ok").id);
+    assert.equal(ok.result, "final"); assert.equal(ok.partialResult, undefined);
+  } finally { await core.close(); }
+});
+
+test("at the soft deadline a steerable runtime is asked to conclude; the operator sees it as a host fact", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const steers: string[] = [];
+  let finish!: (text: string) => void;
+  const core = new Orchestrator({ cwd: process.cwd(), timeoutMs: 100_000, adapters: { codex: { capabilities: { ...capabilities, steer: true }, run: (ctx) => {
+    ctx.registerControls?.({ steer: async (text) => { steers.push(text); } });
+    return new Promise<string>((resolve) => { finish = resolve; });
+  } } } });
+  core.attachEndpoint("http://127.0.0.1:1/mcp");
+  try {
+    const task = core.delegate(null, "codex", "long", "long");
+    await Promise.resolve(); await Promise.resolve();
+    t.mock.timers.tick(84_000);
+    assert.deepEqual(steers, [], "not before 85%");
+    t.mock.timers.tick(1_000);
+    assert.deepEqual(steers, [WRAP_UP_TEXT]);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const view = core.status(null, task.id);
+    assert.equal(taskDetail(view, [view]).text, "plazo casi agotado; se pidió cerrar");
+    assert.equal(taskDetail(view, [view]).tone, "warning");
+    finish("concluded");
+    t.mock.timers.reset();
+    assert.equal((await core.wait(null, task.id)).result, "concluded");
+  } finally { t.mock.timers.reset(); await core.close(); }
+});
+
+test("the model gets a compact view and each result only once; listings carry no result text", async () => {
+  let service: Service | undefined;
+  const tools = new Map<string, any>();
+  const fake = { registerMessageRenderer() {}, registerToolRenderer() {}, on() {}, appendEntry() {}, sendUserMessage() {}, registerCommand() {}, sendMessage() {},
+    registerTool(tool: any) { tools.set(tool.name, tool); } } as unknown as ExtensionAPI;
+  createOrchestratorExtension(async (options) => {
+    service = await createService(options, { codex: { capabilities, run: async (ctx) => { ctx.usage?.({ inputTokens: 100, cachedInputTokens: 0, outputTokens: 20 }); return `answer for ${ctx.prompt}`; } } });
+    return service;
+  })(fake);
+  const ctx = { cwd: process.cwd(), mode: "json", ui: {} } as unknown as ExtensionCommandContext;
+  let calls = 0;
+  const call = async (name: string, args: unknown) => {
+    const result = await tools.get(name).execute(`call-${++calls}`, args, undefined, undefined, ctx);
+    return { model: JSON.parse(result.content[0].text), details: result.details };
+  };
+  try {
+    const a = (await call("orchestrator_delegate", { engine: "codex", prompt: "alpha" })).details as TaskView;
+    const b = (await call("orchestrator_delegate", { engine: "codex", prompt: "beta" })).details as TaskView;
+    const first = await call("orchestrator_wait", { taskIds: [a.id, b.id] });
+    assert.deepEqual(first.model.map((task: any) => task.result), ["answer for alpha", "answer for beta"]);
+    for (const key of ["attemptId", "runtimeProcess", "cwd", "modelState", "createdAt", "depth"]) assert.ok(!(key in first.model[0]), `${key} is not sent to the model`);
+    assert.equal(first.model[0].tokens, 120);
+    assert.equal(first.details[0].attemptId, a.attemptId, "the TUI keeps the full TaskView");
+    const again = await call("orchestrator_wait", { taskIds: [a.id, b.id] });
+    assert.deepEqual(again.model.map((task: any) => task.result), [DELIVERED_NOTE, DELIVERED_NOTE], "a re-poll does not resend results");
+    assert.equal(again.details[0].result, "answer for alpha");
+    const listing = await call("orchestrator_status", {});
+    assert.deepEqual(listing.model.map((task: any) => task.result), [AVAILABLE_NOTE, AVAILABLE_NOTE]);
+    const one = await call("orchestrator_status", { taskId: a.id });
+    assert.equal(one.model.result, "answer for alpha", "an explicit status always returns the result");
+  } finally { await service?.close(); }
+});

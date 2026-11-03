@@ -6,8 +6,9 @@ import { Markdown, Text, truncateToWidth, type Component } from "@earendil-works
 import { TaskDashboard, type PanelAction } from "./dashboard.ts";
 import { resolveTask, safeText, summary, taskLine, taskRows, taskCard, taskCardParts, taskRow, urgentRows, isStalled, modelLabel, failureAdvice, friendlyError, formatInteractionDetail, helpText, usageReport, type Attention } from "./presentation.ts";
 import { createService } from "./service.ts";
+import { DeliveryLedger, modelTask } from "./model-view.ts";
 import { RunStore, type HistoryPage, type RunRecord } from "./journal.ts";
-import { runtimeConfiguration } from "./configuration.ts";
+import { productDefaults, runtimeConfiguration } from "./configuration.ts";
 import { detectAntigravity } from "./antigravity-installation.ts";
 import { planRecovery, recoveryWarning } from "./recovery.ts";
 import { processCensus, reconcileRun, reconciliationWarning } from "./reconciliation.ts";
@@ -63,7 +64,11 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
     // Tasks the model delegated itself: it receives their result through
     // orchestrator_wait, so the settled notice must not repeat it in context.
     const toolTasks = new Set<string>();
-    const reply = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }], details: data });
+    // `content` is the compact model view (results sent once per task);
+    // `details` keeps the full TaskView for the TUI renderers.
+    const ledger = new DeliveryLedger();
+    const reply = (data: unknown, model: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(model) }], details: data });
+    const once = (task: TaskView) => modelTask(task, ledger.take(task));
     // `content` reaches the model; `details` drives the TUI card. A model-facing
     // override keeps the full card for the human without duplicating tokens.
     const message = (content: unknown, modelContent?: string) => pi.sendMessage({
@@ -127,7 +132,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
       if (!active) throw new Error("Pi session is closing");
       latestContext = ctx;
       return service ??= serviceFactory({
-        ...runtimeConfiguration(), cwd: ctx.cwd, stateDirectory,
+        ...productDefaults, ...runtimeConfiguration(), cwd: ctx.cwd, stateDirectory,
         onPersistenceError: (error) => message({ storageError: error }),
         async onInteraction(request, signal) {
           const context = latestContext;
@@ -158,6 +163,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
             const fromTool = toolTasks.delete(event.task.id);
             const outcome = { completed: "terminó", failed: "falló", cancelled: "se canceló" }[event.task.state as "completed"] ?? event.task.state;
             alert(`Tarea ${outcome}`, `${event.task.engine} · ${event.task.title}`, event.task.state === "failed" ? "error" : "info");
+            if (!fromTool) ledger.mark(event.task.id); // the full card below reaches the model
             message({ type: "root-result", task: event.task }, fromTool
               ? `Tarea ${event.task.id} (${event.task.engine}) terminó: ${event.task.state}. Resultado vía orchestrator_wait/orchestrator_status; no se repite aquí.`
               : undefined);
@@ -176,7 +182,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         if (ticker) { clearInterval(ticker); ticker = undefined; }
         latestContext?.ui.setStatus("orchestrator", undefined);
         latestContext?.ui.setWidget("orchestrator", undefined);
-        snapshots.clear(); attention.clear(); listeners.clear(); toolTasks.clear(); latestContext = undefined; tuiRef = undefined;
+        snapshots.clear(); attention.clear(); listeners.clear(); toolTasks.clear(); ledger.clear(); latestContext = undefined; tuiRef = undefined;
       }
     });
 
@@ -271,23 +277,30 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         signal?.throwIfAborted();
         const task = core.delegate(null, params.engine, params.prompt, params.requestKey ?? callId, undefined, { ...(params.model ? { model: params.model } : {}), ...(params.thinking ? { thinking: params.thinking } : {}) }, params.permissionMode);
         toolTasks.add(task.id);
-        return reply(task);
+        return reply(task, once(task));
       },
     }));
     pi.registerTool(defineTool({
       name: "orchestrator_status", label: "Runtime status",
-      description: "List only this coordinator's current tasks or inspect one task, its attempt/session identity and result. Never adopts tasks from transcripts or disk. Opt-in archives are read-only via /orch history, inspect and reconcile.",
+      description: "List this coordinator's current tasks (without result text) or inspect one task with its full result. Never adopts tasks from transcripts or disk. Opt-in archives are read-only via /orch history, inspect and reconcile.",
       parameters: Type.Object({ taskId: Type.Optional(Type.String()) }),
       async execute(_id, params, _signal, _update, ctx) {
         const { core } = await get(ctx);
-        return reply(params.taskId ? core.status(null, params.taskId) : core.list());
+        if (!params.taskId) {
+          // A listing never carries result text: 32 results would flood the context.
+          const all = core.list();
+          return reply(all, all.map((task) => modelTask(task, "summary")));
+        }
+        const task = core.status(null, params.taskId);
+        if (isTerminal(task)) ledger.mark(task.id);
+        return reply(task, modelTask(task, "include"));
       },
     }));
     pi.registerTool(defineTool({
       name: "orchestrator_wait", label: "Wait for runtime result",
       // Each poll is a full model round trip over the whole context, so wait long
       // and for several tasks at once instead of polling every 30 seconds.
-      description: "Wait for one task (taskId) or several (taskIds) until all are terminal, up to timeoutMs (default 300000 = 5 min, max 600000). If any is still running when it returns, call again. Prefer one call with taskIds over separate waits. Cancelling this wait cancels those tasks and their descendants; cancelled is returned only after runtime cleanup.",
+      description: "Wait for one task (taskId) or several (taskIds) until all are terminal, up to timeoutMs (default 300000 = 5 min, max 600000). If any is still running when it returns, call again. Prefer one call with taskIds over separate waits. Each task's result is sent once; later calls return a pointer (fetch it again with orchestrator_status taskId). A failed or cancelled task may carry partialResult: the runtime's last text before it was cut off, not a finished answer. Cancelling this wait cancels those tasks and their descendants; cancelled is returned only after runtime cleanup.",
       parameters: Type.Object({
         taskId: Type.Optional(Type.String()),
         taskIds: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 16 })),
@@ -302,7 +315,8 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
           const views: TaskView[] = [];
           // Sequential waits share one deadline; settled tasks return immediately.
           for (const id of ids) views.push(await core.wait(null, id, Math.max(1, deadline - Date.now()), signal));
-          return reply(params.taskIds ? views : views[0]);
+          const compact = views.map(once);
+          return reply(params.taskIds ? views : views[0], params.taskIds ? compact : compact[0]);
         } catch (error) {
           if (signal?.aborted) await Promise.all(ids.map((id) => core.cancel(null, id).catch(() => undefined)));
           throw error;
@@ -313,14 +327,15 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
       name: "orchestrator_cancel", label: "Cancel runtime tree",
       description: "Cancel a task and its descendants, revoke MCP access, and wait for the stop attempt. A cancelled state confirms cleanup; failed with a cleanup error does not confirm process exit.",
       parameters: Type.Object({ taskId: Type.String() }),
-      async execute(_id, params, _signal, _update, ctx) { return reply(await (await get(ctx)).core.cancel(null, params.taskId)); },
+      async execute(_id, params, _signal, _update, ctx) { const task = await (await get(ctx)).core.cancel(null, params.taskId); return reply(task, once(task)); },
     }));
 
     /** Runs a panel action. Returns true when the panel should reopen. */
     const panelAction = async (action: PanelAction, ctx: ExtensionContext, core: Awaited<ReturnType<typeof createService>>["core"]): Promise<boolean> => {
       const task = tasks().find((entry) => entry.id === action.taskId);
       if (!task) { ctx.ui.notify("La tarea ya no está disponible.", "warning"); return true; }
-      const text = safeText(task.result ?? (task.error ? friendlyError(task.error) : ""));
+      // A partial answer is what the operator wants to keep from a cut-off task.
+      const text = safeText(task.result ?? task.partialResult ?? (task.error ? friendlyError(task.error) : ""));
       try {
         switch (action.kind) {
           case "steer": {
@@ -399,7 +414,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
           if (ctx.mode === "tui" && tasks().some((task) => !isTerminal(task)) && !await ctx.ui.confirm("Reiniciar orquestador", "Se cancelarán todas las tareas activas y sus descendientes. ¿Continuar?")) return;
           const previous = service; service = undefined;
           try { await (await previous)?.close(); }
-          finally { snapshots.clear(); toolTasks.clear(); latestContext = ctx; refresh(); }
+          finally { snapshots.clear(); toolTasks.clear(); ledger.clear(); latestContext = ctx; refresh(); }
           message({ reset: true }); return;
         }
         if (!verb || verb === "panel") {

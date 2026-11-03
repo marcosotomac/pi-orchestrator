@@ -1,5 +1,16 @@
 import type { OrchestratorOptions } from "./orchestrator.ts";
 
+/**
+ * Product defaults for the Pi extension; explicit environment settings win.
+ * The core keeps its conservative library defaults (reject queue, 3 slots, 60 s
+ * dialogs) so embedding and tests stay explicit.
+ * - fair: a fan-out of N root tasks queues instead of failing the (N+1)th.
+ * - 4 slots: with fair, one slot is reserved for nested children, so three
+ *   roots still run in parallel as before.
+ * - 5 min dialogs: a permission must survive the operator being in another tab.
+ */
+export const productDefaults: Partial<OrchestratorOptions> = { queuePolicy: "fair", maxConcurrent: 4, interactionTimeoutMs: 300_000 };
+
 /** Read-only configuration parsing; no timers, files, ports or subprocesses. */
 export function runtimeConfiguration(env: NodeJS.ProcessEnv = process.env): Partial<OrchestratorOptions> {
   const options: Partial<OrchestratorOptions> = {};

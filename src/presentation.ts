@@ -134,6 +134,8 @@ const short = (ms: number) => {
 /** Host facts first (children, stall), then the engine's own reported action. */
 export function taskDetail(task: TaskView, tasks: TaskView[] = [], attention?: Attention, now = Date.now()): { text?: string; tone: "warning" | "muted" } {
   if (isTerminal(task) || attention) return { tone: "muted" };
+  // The orchestrator's own action (soft deadline) is a host fact, not an engine report.
+  if (task.lastActivity?.startsWith("orchestrator: ")) return { text: task.lastActivity.slice(14), tone: "warning" };
   const live = tasks.filter((child) => child.parentId === task.id && !isTerminal(child));
   if (live.length) {
     const engines = [...new Set(live.map((child) => engineName(child.engine)))].join(", ");
@@ -242,7 +244,7 @@ export function taskRow(task: TaskView, prefix: string, width: number, tasks: Ta
 
 /** Card sections, so the TUI can render a completed result as markdown. All strings are sanitized. */
 export function taskCardParts(task: TaskView, expanded = false, attention?: Attention): { head: string; body?: { text: string; markdown: boolean }; tail: string } {
-  const result = safeText(task.error ? friendlyError(task.error) : task.result ?? "");
+  const result = safeText(task.error ? `${friendlyError(task.error)}${task.partialResult ? `\n\n${task.partialResult}` : ""}` : task.result ?? "");
   const preview = expanded || result.length <= 480 ? result : `${result.slice(0, 480)}…`;
   const tokens = formatTokens(task.usage);
   const head = [

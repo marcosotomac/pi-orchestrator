@@ -23,7 +23,7 @@ const taskSchema = z.object({
   selection: z.object({ model: z.string().max(128).optional(), thinking: z.string().max(128).optional() }).strict().optional(),
   modelState: z.object({ model: z.string().max(128).optional(), thinking: z.string().max(128).optional(), availableModels: z.array(z.object({ id: z.string().max(128), name: z.string().max(160) }).strict()).max(128), availableThinking: z.array(z.string().max(128)).max(128) }).strict().optional(),
   diagnostic: z.object({ category: z.enum(["authentication", "network", "quota", "protocol", "cleanup", "unknown"]), recovery: z.string().max(512), automaticRetry: z.literal(false) }).strict().optional(),
-  result: z.string().max(20_000).optional(), error: z.string().max(8_000).optional(),
+  result: z.string().max(20_000).optional(), partialResult: z.string().max(20_000).optional(), error: z.string().max(8_000).optional(),
   usage: z.object({ inputTokens: z.number().int().nonnegative(), cachedInputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), reasoningTokens: z.number().int().nonnegative().optional(), costUsd: z.number().nonnegative().optional() }).strict().optional(),
 }).strict();
 const runSchema = z.object({

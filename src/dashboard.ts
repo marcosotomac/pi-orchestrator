@@ -119,7 +119,7 @@ export class TaskDashboard implements Component {
           ...(task.error && friendlyError(task.error) !== safeText(task.error) ? [`Error original: ${task.error}`] : [])] : []),
       ].join("\n"));
       const body = task.error
-        ? [...new Text(safeText(`Motivo: ${friendlyError(task.error)}${task.state === "failed" ? `\n\n${failureAdvice(task)}` : ""}`), 0, 0).render(Math.max(1, width))]
+        ? [...new Text(safeText(`Motivo: ${friendlyError(task.error)}${task.state === "failed" ? `\n\n${failureAdvice(task)}` : ""}${task.partialResult ? `\n\n${task.partialResult}` : ""}`), 0, 0).render(Math.max(1, width))]
         : task.result
           ? (this.options.markdown ? this.options.markdown(safeText(task.result), Math.max(1, width)) : new Text(safeText(task.result), 0, 0).render(Math.max(1, width)))
           : [theme.fg("dim", "Esperando resultado del runtime…")];

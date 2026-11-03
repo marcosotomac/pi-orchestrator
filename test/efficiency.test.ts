@@ -23,16 +23,22 @@ test("limits are configurable, fail closed, and defaults no longer kill normal t
   for (const bad of ["0", "501", "-1", "1.5", "many"]) assert.throws(() => claudeLimit("T", 40, 1, 500, { T: bad }), /Invalid T/);
 });
 
-test("the host may wait long; MCP callers stay under the bridge transport timeout", async () => {
+test("the host and Codex/Claude workers may wait long; Antigravity callers keep the short window", async () => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
-  const core = new Orchestrator({ cwd: process.cwd(), adapters: { codex: { capabilities, run: async () => { await gate; return "done"; } } } });
+  const run = async () => { await gate; return "done"; };
+  const core = new Orchestrator({ cwd: process.cwd(), adapters: { codex: { capabilities, run }, antigravity: { capabilities, run } } });
   core.attachEndpoint("http://127.0.0.1:1/mcp");
   try {
     const root = core.delegate(null, "codex", "root", "root");
+    const agy = core.delegate(null, "antigravity", "agy root", "agy");
     assert.equal((await core.wait(null, root.id, 1)).state, "running");
     await assert.rejects(core.wait(null, root.id, 600_001), /1–600000/);
-    await assert.rejects(core.wait(root.id, root.id, 60_001), /1–60000 ms/);
+    // Every MCP poll costs the worker a model turn: Codex/Claude clients allow 660 s.
+    await assert.rejects(core.wait(root.id, root.id, 600_001), /1–600000 ms/);
+    assert.deepEqual(core.waitWindow(root.id), { defaultMs: 300_000, maxMs: 600_000 });
+    await assert.rejects(core.wait(agy.id, agy.id, 60_001), /1–60000 ms/);
+    assert.deepEqual(core.waitWindow(agy.id), { defaultMs: 30_000, maxMs: 60_000 });
     const waiting = core.wait(null, root.id, 600_000);
     release();
     assert.equal((await waiting).state, "completed");

@@ -49,6 +49,8 @@ export interface TaskView {
   lastActivity?: string;
   activityAt?: string;
   result?: string;
+  /** Last answer text observed before a failure or cancellation; never a completion. */
+  partialResult?: string;
   error?: string;
   diagnostic?: import("./diagnostics.ts").FailureDiagnostic;
   usage?: TaskUsage;
@@ -70,6 +72,8 @@ export interface RuntimeContext {
   modelState?: (state: import("./model-selection.ts").ModelState) => void;
   /** Cumulative provider usage for this attempt; replaces earlier reports. */
   usage?: (usage: TaskUsage) => void;
+  /** Latest answer text so far (replaces earlier reports); published only if the attempt does not complete. */
+  partial?: (text: string) => void;
 }
 
 export interface RuntimeAdapter {

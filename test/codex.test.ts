@@ -43,6 +43,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
    if(mode==='yolo') require('node:assert/strict').ok(!q.params.developerInstructions.includes('Do not modify files'));
    require('node:assert/strict').equal(q.params.config.model_reasoning_effort,mode==='thinking'?'high':mode==='unsupported-thinking'?'invented':'medium');
    require('node:assert/strict').equal(q.params.config['mcp_servers.user-shell.enabled'],false);
+   require('node:assert/strict').equal(q.params.config['mcp_servers.pi_orchestrator.tool_timeout_sec'],660);
    if(mode==='premature-completion') send(done);
    send({id:q.id,result:{model:'chosen',thread:mode==='missing-thread'?{}:{id:'fixture-thread'}}});
  }
@@ -68,6 +69,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
 });
 `, { mode: 0o700 });
     const observations: RuntimeProcessInfo[] = [];
+    const partials: string[] = [];
     const controller = new AbortController();
     const watchdog = setTimeout(() => controller.abort(new Error("Fixture protocol deadline")), 15_000);
     const task: TaskView = { id: "task", title: "fixture", attemptId: "attempt", parentId: null, engine: "codex", depth: 1, state: "running", cwd, createdAt: new Date().toISOString() };
@@ -76,10 +78,12 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
       if (mode === "thinking" || mode === "unsupported-thinking") task.selection = { model: "chosen", thinking: mode === "thinking" ? "high" : "invented" };
       const running = new CodexAdapter(executable).run({ task, prompt: "fixture", signal: controller.signal,
         mcp: { url: "http://127.0.0.1:12345/mcp", token: "fixture-private-token" }, session() {}, activity() {},
+        partial: (text) => { partials.push(text); },
         process: (info) => { observations.push(info); },
       });
       if (expected) await assert.rejects(running, expected);
       else assert.equal(await running, "fixture result");
+      if (mode === "item-fallback") assert.deepEqual(partials, ["fixture result"], "completed agent messages are reported as partial text");
       assert.ok(observations.at(-1)?.exitedAt, "Protocol failure or success must observe exit before settling");
     } finally { clearTimeout(watchdog); await rm(cwd, { recursive: true, force: true }); }
   });

@@ -10,6 +10,10 @@ import { errorText, isTerminal, RuntimeCleanupError, validatePermissionMode, typ
 
 /** Journal/schema bound for a published result. */
 export const MAX_RESULT = 20_000;
+export const PARTIAL_NOTE = "\n\n[Resultado parcial: la tarea no terminó; este es el último texto que el runtime produjo antes de cortarse.]";
+/** Soft deadline: at this fraction of the task timeout, steerable runtimes are asked to answer now. */
+export const SOFT_DEADLINE = 0.85;
+export const WRAP_UP_TEXT = "Time limit almost reached. Stop exploring now and give your final answer with what you already have. State clearly what you could not verify or finish.";
 export const TRUNCATION_NOTE = `\n\n[Resultado truncado por el orquestador: superaba ${MAX_RESULT} caracteres; se publican los primeros. Pide al runtime un resumen o que escriba el detalle en un archivo.]`;
 
 function validUsage(value: TaskUsage): TaskUsage | undefined {
@@ -36,6 +40,8 @@ interface Entry {
   resumeSessionId?: string;
   /** Kept in memory only, for an explicit operator retry of a root task. */
   prompt: string;
+  /** Latest runtime answer text; published as partialResult only if the attempt does not complete. */
+  partial?: string;
 }
 
 export interface OrchestratorOptions {
@@ -253,6 +259,18 @@ export class Orchestrator {
     const timer = setTimeout(() => {
       this.abortTree(entry.view.id, "Task deadline exceeded");
     }, this.limits.timeoutMs);
+    // Killing at the deadline discards everything; a steerable runtime is first
+    // asked to conclude. Best effort: failure here never affects the task.
+    const soft = this.limits.timeoutMs >= 60_000 ? setTimeout(() => {
+      if (entry.view.state !== "running" || entry.steering || !entry.controls?.steer || !this.identities.has(entry.tokenHash)) return;
+      entry.steering = true;
+      entry.controls.steer(WRAP_UP_TEXT).then(() => {
+        if (entry.view.state !== "running") return;
+        entry.view.lastActivity = "orchestrator: plazo casi agotado; se pidió cerrar";
+        entry.view.activityAt = new Date().toISOString();
+        this.emit("activity", entry, entry.view.lastActivity);
+      }, () => { /* the hard deadline still applies */ }).finally(() => { entry.steering = false; });
+    }, Math.floor(this.limits.timeoutMs * SOFT_DEADLINE)) : undefined;
     try {
       entry.controller.signal.throwIfAborted();
       output = await this.options.adapters[entry.view.engine]!.run({
@@ -265,6 +283,11 @@ export class Orchestrator {
           entry.view.usage = clean;
           // Display-only: the final settle checkpoint persists it without an fsync per update.
           this.emit("usage", entry, undefined, false);
+        },
+        partial: (text) => {
+          // Memory only: no event or checkpoint per streamed fragment.
+          if (isTerminal(entry.view) || !this.identities.has(entry.tokenHash) || typeof text !== "string") return;
+          entry.partial = text.slice(0, MAX_RESULT + 1);
         },
         modelState: (state) => {
           if (entry.controller.signal.aborted || !this.identities.has(entry.tokenHash)) return;
@@ -307,7 +330,7 @@ export class Orchestrator {
       if (output.length > MAX_RESULT) output = output.slice(0, MAX_RESULT - TRUNCATION_NOTE.length) + TRUNCATION_NOTE;
     } catch (error) { didFail = true; failure = error; }
     finally {
-      clearTimeout(timer);
+      clearTimeout(timer); clearTimeout(soft);
       // A finished parent may not leave orphaned live work or valid delegation credentials.
       this.identities.delete(entry.tokenHash);
       this.interactions.cancelTask(entry.view.id);
@@ -334,6 +357,12 @@ export class Orchestrator {
         entry.view.state = "completed";
         entry.view.result = output!;
       }
+      if (entry.view.state !== "completed" && entry.partial?.trim()) {
+        let partial = this.redact(entry.partial, token);
+        if (partial.length > MAX_RESULT - PARTIAL_NOTE.length) partial = partial.slice(0, MAX_RESULT - PARTIAL_NOTE.length - TRUNCATION_NOTE.length) + TRUNCATION_NOTE;
+        entry.view.partialResult = partial + PARTIAL_NOTE;
+      }
+      delete entry.partial;
       entry.view.endedAt = new Date().toISOString();
       this.activeCount--;
       if (entry.view.parentId === null) this.activeRoots--;
@@ -436,11 +465,19 @@ export class Orchestrator {
     return this.status(callerId, id);
   }
 
+  /**
+   * Bounds of one blocking wait. Every MCP poll is a full model turn of the
+   * calling worker, so Codex/Claude callers (whose MCP clients are configured with
+   * 660 s tool timeouts) may wait long; Antigravity's client timeout is unverified.
+   */
+  waitWindow(callerId: string | null): { defaultMs: number; maxMs: number } {
+    if (callerId === null) return { defaultMs: 30_000, maxMs: 600_000 };
+    return this.entry(callerId).view.engine === "antigravity" ? { defaultMs: 30_000, maxMs: 60_000 } : { defaultMs: 300_000, maxMs: 600_000 };
+  }
+
   async wait(callerId: string | null, id: string, timeoutMs = 30_000, signal?: AbortSignal): Promise<TaskView> {
     this.authorize(callerId, id);
-    // The in-process host may block long (no transport); MCP callers stay under
-    // the bridge's 70 s HTTP request timeout.
-    const maxWait = callerId === null ? 600_000 : 60_000;
+    const maxWait = this.waitWindow(callerId).maxMs;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > maxWait) throw new Error(`Wait must be 1–${maxWait} ms`);
     signal?.throwIfAborted();
     const entry = this.entry(id);
