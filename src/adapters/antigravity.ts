@@ -7,6 +7,8 @@ import { RuntimeProcess } from "./process.ts";
 import { antigravityEnvironment } from "../antigravity-profile.ts";
 import { detectAntigravity } from "../antigravity-installation.ts";
 
+const MAX_DENIALS = 8;
+
 /** ACP only. Never falls back to agy --print or edits a global MCP/auth profile. */
 export class AntigravityAdapter implements RuntimeAdapter {
   capabilities = { ...capabilities, interactiveQuestions: true, interactivePermissions: true, resume: true };
@@ -25,6 +27,15 @@ export class AntigravityAdapter implements RuntimeAdapter {
     const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
     let promptRequestId: number | undefined;
     let nextId = 0, sessionId: string | undefined, prompting = false, stopping = false, output = "", protocolError: Error | undefined;
+    // A refused operation is answered "cancelled" and the turn goes on, as Codex and
+    // Claude do; protocol anomalies still fail. Measured: failing the whole task on
+    // the first unapproved tool lost ~15% of nested Antigravity runs.
+    let denials = 0;
+    const deny = (reason: string) => {
+      denials++;
+      ctx.activity(`antigravity: denied permission (${reason})`);
+      if (denials > MAX_DENIALS) throw new Error(`Antigravity kept requesting unapproved operations (${denials} denied)`);
+    };
     const early: any[] = [];
     let earlyBytes = 0;
     const onUpdate = (params: any) => {
@@ -88,14 +99,16 @@ export class AntigravityAdapter implements RuntimeAdapter {
                 options: choices.map((option: any) => ({ id: option.optionId, label: option.name ?? option.kind })) }).then((answer) => {
                 if (ctx.signal.aborted || stopping || protocolError || !prompting) return;
                 runtime.send({ jsonrpc: "2.0", id: message.id, result: { outcome: answer ? { outcome: "selected", optionId: answer.optionId } : { outcome: "cancelled" } } });
-                if (!answer) fail(new Error("Antigravity interaction was denied or expired"));
+                if (!answer) { try { deny("not granted by the operator"); } catch (error) { fail(error as Error); } }
               }).catch(() => fail(new Error("Antigravity interaction failed closed")));
               return;
             }
             runtime.send({ jsonrpc: "2.0", id: message.id, result: { outcome: { outcome: "cancelled" } } });
             const reason = params?.sessionId !== sessionId ? "foreign-session" : (typeof call?.toolCallId === "string" && call.toolCallId.startsWith("interaction_")) ? "user-question" : call?._meta?.is_mcp_tool_call !== true ? "non-mcp-tool" : call?._meta?.mcp?.server !== "pi_orchestrator" ? "foreign-server" : !["delegate", "status", "wait", "cancel"].includes(tool) ? "unknown-tool" : call.title !== `pi_orchestrator_${tool}` ? "title-mismatch" : "no-allow-once";
-            ctx.activity(`antigravity: denied permission (${reason})`);
-            throw new Error("Antigravity permission or interactive answer is required; no authorized one-time approval is available");
+            // Outside this session's live turn the request is an anomaly, not a tool choice.
+            if (!local) { ctx.activity(`antigravity: denied permission (${reason})`); throw new Error("Antigravity permission request outside the live session turn"); }
+            deny(reason);
+            return;
           }
           if (message.id !== undefined) {
             runtime.send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Unsupported client method" } });
@@ -145,12 +158,15 @@ export class AntigravityAdapter implements RuntimeAdapter {
       await request("session/set_mode", { sessionId, modeId: "default" });
       ctx.modelState?.(await selectAcpModel(session, ctx.task.selection ?? {}, request, sessionId!));
       prompting = true;
+      // No WORKER_CONTRACT here: appended to the prompt it made Antigravity reach for
+      // approval-gated tools; restricted nested tasks then failed (measured 0/4 vs 6/6).
       const result = await request("session/prompt", { sessionId, prompt: [{ type: "text", text: ctx.prompt }] });
       prompting = false;
       if (result?.stopReason !== "end_turn" || !output.trim()) throw new Error("Antigravity ACP turn did not complete with text");
     } finally { stopping = true; await runtime.stop(); }
     if (runtime.failure) throw runtime.failure;
     if (protocolError) throw protocolError;
-    return output;
+    // Labelled, like Claude's denied tools: the answer may be incomplete.
+    return denials ? `${output}\n\n[Aviso del orquestador: Antigravity pidió ${denials} ${denials === 1 ? "operación" : "operaciones"} sin aprobación y se ${denials === 1 ? "denegó" : "denegaron"}; el resultado puede estar incompleto.]` : output;
   }
 }

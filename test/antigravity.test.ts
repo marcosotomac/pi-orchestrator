@@ -13,7 +13,7 @@ const context = (signal: AbortSignal, processes: RuntimeProcessInfo[], sessions:
   process: (info) => processes.push(info), session: (id) => sessions.push(id), activity: () => {},
 });
 
-for (const scenario of ["yolo-success", "yolo-late", "yolo-invalid-id", "yolo-foreign", "yolo-persistent", "yolo-question", "yolo-duplicate", "yolo-invalid-options", "success", "version", "identity", "no-http", "auth", "no-session", "no-plan", "permission", "question", "client-write", "wrong-session", "oversize", "malformed", "bad-stop", "duplicate", "trailing", "early-exit", "hang", "bridge-success", "bridge-unknown-tool", "bridge-foreign-session", "bridge-question", "bridge-title-spoof", "bridge-no-mcp", "bridge-foreign-server", "bridge-only-always", "human-allow", "human-deny", "human-question", "early-update", "early-foreign"]) {
+for (const scenario of ["yolo-success", "yolo-late", "yolo-invalid-id", "yolo-foreign", "yolo-persistent", "yolo-question", "yolo-duplicate", "yolo-invalid-options", "success", "version", "identity", "no-http", "auth", "no-session", "no-plan", "permission", "question", "client-write", "wrong-session", "oversize", "malformed", "bad-stop", "duplicate", "trailing", "early-exit", "hang", "bridge-success", "bridge-unknown-tool", "bridge-foreign-session", "bridge-question", "bridge-title-spoof", "bridge-no-mcp", "bridge-foreign-server", "bridge-only-always", "human-allow", "human-deny", "human-question", "early-update", "early-foreign", "many-denials"]) {
   test(`Antigravity ACP fixture: ${scenario}`, { skip: process.platform === "win32", timeout: 5000 }, async () => {
     chmodSync(executable, 0o700);
     const previous = process.env.ORCH_ACP_FIXTURE_CASE;
@@ -39,12 +39,16 @@ for (const scenario of ["yolo-success", "yolo-late", "yolo-invalid-id", "yolo-fo
       const run = new AntigravityAdapter(executable, true, () => process.env).run(ctx);
       if (["yolo-success", "success", "bridge-success", "human-allow", "human-question", "early-update"].includes(scenario)) {
         assert.equal(await run, "fixture answer"); assert.deepEqual(sessions, ["fixture-session"]);
+      } else if (["yolo-question", "yolo-persistent", "bridge-unknown-tool", "bridge-question", "bridge-title-spoof", "bridge-no-mcp", "bridge-foreign-server", "bridge-only-always", "permission", "question", "human-deny"].includes(scenario)) {
+        // Refused, not fatal: the turn continues without the operation, and the answer is labelled.
+        assert.match(await run, /^fixture answer\n\n\[Aviso del orquestador: Antigravity pidió 1 operación sin aprobación y se denegó/);
       } else if (scenario === "oversize") {
         // The adapter keeps one char past the bound; the core labels the truncation.
         assert.equal((await run).length, 20_001); assert.deepEqual(sessions, ["fixture-session"]);
       } else await assert.rejects(run, (error: Error) => {
         assert.ok(!error.message.includes("private provider error"));
         assert.ok(!error.message.includes("fixture-private-token"));
+        if (scenario === "many-denials") assert.match(error.message, /9 denied/);
         if (scenario === "early-foreign") assert.match(error.message, /unknown session/, "a held update from another session still fails closed");
         return true;
       });

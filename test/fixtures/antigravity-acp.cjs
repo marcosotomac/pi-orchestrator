@@ -4,6 +4,11 @@ const assert = require('node:assert/strict');
 const scenario = process.env.ORCH_ACP_FIXTURE_CASE || 'success';
 const send = (value) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n');
 let token, promptId;
+// After a denied operation a real agent answers without it and ends the turn.
+const finishAfterDenial = () => {
+  send({ method: 'session/update', params: { sessionId: 'fixture-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'fixture answer' } } } });
+  send({ id: promptId, result: { stopReason: 'end_turn' } });
+};
 createInterface({ input: process.stdin }).on('line', (line) => {
   const message = JSON.parse(line), { id, method, params } = message;
   try {
@@ -30,7 +35,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     }
     if (method === 'session/prompt') {
       promptId = id;
-      assert.equal(params.sessionId, 'fixture-session'); assert.equal(params.prompt[0].text, 'fixture prompt');
+      assert.equal(params.sessionId, 'fixture-session'); assert.equal(params.prompt[0].text, 'fixture prompt', 'Antigravity receives the task verbatim (no answer-format suffix)');
       if (scenario.startsWith('yolo-')) {
         const permission = { id: 'yolo-approval', method: 'session/request_permission', params: {
           sessionId: scenario === 'yolo-foreign' ? 'foreign' : 'fixture-session',
@@ -58,6 +63,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
             _meta: { is_mcp_tool_call: scenario !== 'bridge-no-mcp', mcp: { server: scenario === 'bridge-foreign-server' ? 'external' : 'pi_orchestrator', tool } } },
           options: [{ optionId: 'once', kind: scenario === 'bridge-only-always' ? 'allow_always' : 'allow_once' }] } });
       }
+      if (scenario === 'many-denials') { for (let n = 1; n <= 9; n++) send({ id: `deny-${n}`, method: 'session/request_permission', params: { sessionId: 'fixture-session', toolCall: { toolCallId: `tool-${n}` }, options: [{ optionId: 'allow', kind: 'allow_once' }] } }); return; }
       if (scenario === 'hang') return;
       if (scenario === 'early-exit') return process.exit(0);
       if (scenario.startsWith('human-')) return send({ id: 'human-1', method: 'session/request_permission', params: { sessionId: 'fixture-session', toolCall: { toolCallId: scenario === 'human-question' ? 'interaction_1' : 'operation-1', title: 'Fixture human request', rawInput: { operation: 'fixture only' } }, options: [{ optionId: 'once', name: 'Answer or approve once', kind: 'allow_once' }, { optionId: 'always', name: 'Always approve', kind: 'allow_always' }] } });
@@ -75,7 +81,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         assert.equal(message.result.outcome.outcome, 'selected'); assert.equal(message.result.outcome.optionId, 'once');
         send({ method: 'session/update', params: { sessionId: 'fixture-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'fixture answer' } } } });
         send({ id: promptId, result: { stopReason: 'end_turn' } });
-      } else assert.equal(message.result.outcome.outcome, 'cancelled');
+      } else { assert.equal(message.result.outcome.outcome, 'cancelled'); finishAfterDenial(); }
     }
     if (id === 'bridge-approval') {
       assert.equal(message.result.outcome.outcome, scenario === 'bridge-success' ? 'selected' : 'cancelled');
@@ -83,7 +89,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         assert.equal(message.result.outcome.optionId, 'once');
         send({ method: 'session/update', params: { sessionId: 'fixture-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'fixture answer' } } } });
         send({ id: promptId, result: { stopReason: 'end_turn' } });
-      }
+      } else finishAfterDenial();
     }
     if (id === 'human-1') {
       assert.equal(message.result.outcome.outcome, scenario === 'human-deny' ? 'cancelled' : 'selected');
@@ -91,9 +97,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         assert.equal(message.result.outcome.optionId, 'once');
         send({ method: 'session/update', params: { sessionId: 'fixture-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'fixture answer' } } } });
         send({ id: promptId, result: { stopReason: 'end_turn' } });
-      }
+      } else finishAfterDenial();
     }
-    if (id === 'permission-1') assert.equal(message.result.outcome.outcome, 'cancelled');
+    if (id === 'permission-1') { assert.equal(message.result.outcome.outcome, 'cancelled'); finishAfterDenial(); }
     if (id === 'write-1') assert.equal(message.error.code, -32601);
   } catch { process.stderr.write('Fixture contract assertion failed\n'); process.exit(2); }
 });
