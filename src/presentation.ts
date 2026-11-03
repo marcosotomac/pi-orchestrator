@@ -1,0 +1,363 @@
+import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { defaultEffort } from "./adapters/codex.ts";
+import { isTerminal, type TaskUsage, type TaskView } from "./types.ts";
+
+/** Provider output is untrusted terminal data: no OSC links, escapes, or control bytes. */
+export function safeText(text: string): string {
+  return stripTerminalSequences(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "").replace(/\t/g, "  ");
+}
+const oneLine = (text: string) => safeText(text).replace(/\s*\n\s*/g, " ");
+export const stateLabel = { queued: "en cola", running: "en curso", cancelling: "cancelando", completed: "completada", failed: "fallida", cancelled: "cancelada" } as const;
+
+/** Only non-zero counts; what needs the human comes first. */
+export function summary(tasks: TaskView[], attention?: (id: string) => Attention | undefined): string {
+  const count = (predicate: (task: TaskView) => boolean) => tasks.filter(predicate).length;
+  const waiting = attention ? count((task) => !isTerminal(task) && Boolean(attention(task.id))) : 0;
+  const parts: [number, string][] = [
+    [waiting, waiting === 1 ? "te necesita" : "te necesitan"],
+    [count((task) => task.state === "failed"), "fallida"],
+    [count((task) => task.state === "running"), "en curso"],
+    [count((task) => task.state === "cancelling"), "cancelando"],
+    [count((task) => task.state === "queued"), "en cola"],
+    [count((task) => task.state === "completed"), "lista"],
+    [count((task) => task.state === "cancelled"), "cancelada"],
+  ];
+  const plural = (n: number, label: string) => n === 1 || label.startsWith("te ") || label === "en curso" || label === "en cola" || label === "cancelando" ? label : `${label}s`;
+  const text = parts.filter(([n]) => n > 0).map(([n, label]) => label.startsWith("te ") ? `${n} ${label}` : `${n} ${plural(n, label)}`).join(" · ");
+  return text || "sin tareas";
+}
+
+/** Stable preorder by actual parent identity, never by a provider's claimed depth. */
+export function taskRows(tasks: TaskView[]): { task: TaskView; prefix: string }[] {
+  const rows: { task: TaskView; prefix: string }[] = [];
+  const seen = new Set<string>();
+  const visit = (task: TaskView, depth: number) => {
+    if (seen.has(task.id)) return;
+    seen.add(task.id);
+    rows.push({ task, prefix: depth ? `${"  ".repeat(depth - 1)}└─ ` : "" });
+    for (const child of tasks) if (child.parentId === task.id) visit(child, depth + 1);
+  };
+  for (const task of tasks) if (!task.parentId || !tasks.some((parent) => parent.id === task.parentId)) visit(task, 0);
+  for (const task of tasks) visit(task, 0);
+  return rows;
+}
+export type Attention = "permission" | "question";
+export const stateIcon = { queued: "○", running: "●", cancelling: "◌", completed: "✓", failed: "!", cancelled: "–" } as const;
+
+/** Running tasks without host-observed activity for this long are flagged (host clock, not provider text). */
+export const STALL_MS = 180_000;
+export function isStalled(task: TaskView, tasks: TaskView[] = [], now = Date.now()): boolean {
+  if (task.state !== "running" || !task.runtimeSessionId) return false;
+  if (tasks.some((child) => child.parentId === task.id && !isTerminal(child))) return false; // waiting on children is not a stall
+  const last = Date.parse(task.activityAt ?? task.createdAt);
+  return Number.isFinite(last) && now - last >= STALL_MS;
+}
+
+/** Lower is more urgent: what needs the human, then failures, then live work, then history. */
+export function urgency(task: TaskView, attention?: Attention, tasks: TaskView[] = [], now = Date.now()): number {
+  if (attention && !isTerminal(task)) return 0;
+  if (task.state === "failed") return 1;
+  if (isStalled(task, tasks, now)) return 2;
+  return { cancelling: 3, running: 4, queued: 5, completed: 6, cancelled: 7, failed: 1 }[task.state];
+}
+
+/** Preorder tree whose roots and siblings are ordered by the most urgent task in their subtree. */
+export function urgentRows(tasks: TaskView[], attention: (id: string) => Attention | undefined = () => undefined, now = Date.now()) {
+  const memo = new Map<string, number>();
+  const score = (task: TaskView): number => {
+    const cached = memo.get(task.id);
+    if (cached !== undefined) return cached;
+    memo.set(task.id, Number.POSITIVE_INFINITY); // cycle guard
+    const own = urgency(task, attention(task.id), tasks, now);
+    const value = Math.min(own, ...tasks.filter((child) => child.parentId === task.id).map(score));
+    memo.set(task.id, value);
+    return value;
+  };
+  const order = (list: TaskView[]) => [...list].sort((a, b) => score(a) - score(b) || Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  const rows: { task: TaskView; prefix: string; depth: number }[] = [];
+  const seen = new Set<string>();
+  const visit = (task: TaskView, depth: number) => {
+    if (seen.has(task.id)) return;
+    seen.add(task.id);
+    rows.push({ task, prefix: depth ? `${"  ".repeat(depth - 1)}└ ` : "", depth });
+    for (const child of order(tasks.filter((entry) => entry.parentId === task.id))) visit(child, depth + 1);
+  };
+  for (const task of order(tasks.filter((entry) => !entry.parentId || !tasks.some((parent) => parent.id === entry.parentId)))) visit(task, 0);
+  for (const task of tasks) visit(task, 0);
+  return rows;
+}
+
+export function taskPhase(task: TaskView, attention?: Attention): string {
+  if (task.state !== "running") return stateLabel[task.state];
+  if (attention) return attention === "permission" ? "esperando tu permiso" : "esperando tu respuesta";
+  if (!task.runtimeSessionId) return "iniciando sesión";
+  // A live child alone does not prove that its parent is waiting for it.
+  return "trabajando";
+}
+
+/**
+ * Readable label for the runtime's own last reported action. It is shown as
+ * "what the engine reported", never as a host-verified phase or progress.
+ */
+export function activityLabel(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const text = oneLine(raw);
+  const rules: [RegExp, string][] = [
+    [/mcp\/pi_orchestrator\/delegate|mcp__pi_orchestrator__delegate/, "delegando una subtarea"],
+    [/mcp\/pi_orchestrator\/wait|mcp__pi_orchestrator__wait/, "consultando sus subtareas"],
+    [/mcp\/pi_orchestrator\/(status|cancel)|mcp__pi_orchestrator__(status|cancel)/, "gestionando sus subtareas"],
+    [/waiting for human permission/, "pidiendo tu permiso"],
+    [/waiting for user answer/, "esperando tu respuesta"],
+    [/approval denied|denied permission/, "una acción fue denegada por permisos"],
+    [/YOLO approval/, "acción aprobada (YOLO)"],
+    [/scoped bridge approval/, "usando el canal del orquestador"],
+    [/codex: commandExecution|claude: Bash/, "ejecutando un comando"],
+    [/codex: fileChange|claude: (Write|Edit|MultiEdit)/, "editando archivos"],
+    [/claude: (Grep|Glob)/, "buscando en el código"],
+    [/claude: Read/, "leyendo archivos"],
+    [/codex: reasoning/, "razonando"],
+    [/codex: agentMessage/, "redactando la respuesta"],
+    [/codex: webSearch|WebSearch|WebFetch/, "consultando la web"],
+    [/antigravity: tool activity/, "usando herramientas"],
+  ];
+  for (const [pattern, label] of rules) if (pattern.test(text)) return label;
+  const mcp = /codex: mcp\/([\w.-]+)\/([\w.-]+)/.exec(text) ?? /mcp__([\w.-]+)__([\w.-]+)/.exec(text);
+  if (mcp) return `herramienta ${mcp[1]}/${mcp[2]}`;
+  return text.replace(/^(codex|claude|antigravity):\s*/, "").slice(0, 60) || undefined;
+}
+
+const short = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1_000));
+  return s < 60 ? `${s}s` : s < 3_600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3_600)}h ${Math.floor((s % 3_600) / 60)}m`;
+};
+
+/** Host facts first (children, stall), then the engine's own reported action. */
+export function taskDetail(task: TaskView, tasks: TaskView[] = [], attention?: Attention, now = Date.now()): { text?: string; tone: "warning" | "muted" } {
+  if (isTerminal(task) || attention) return { tone: "muted" };
+  const live = tasks.filter((child) => child.parentId === task.id && !isTerminal(child));
+  if (live.length) {
+    const engines = [...new Set(live.map((child) => engineName(child.engine)))].join(", ");
+    return { text: `${live.length} ${live.length === 1 ? "subtarea activa" : "subtareas activas"} (${engines})`, tone: "muted" };
+  }
+  if (isStalled(task, tasks, now)) return { text: `sin actividad hace ${short(now - Date.parse(task.activityAt ?? task.createdAt))}`, tone: "warning" };
+  const action = activityLabel(task.lastActivity);
+  return { text: action ? `motor: ${action}` : undefined, tone: "muted" };
+}
+
+export function engineName(engine: TaskView["engine"]): string {
+  return engine === "antigravity" ? "agy" : engine;
+}
+
+export function formatTokens(usage?: TaskUsage): string | undefined {
+  if (!usage) return undefined;
+  const k = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${Math.round(n / 1_000)}k` : `${n}`;
+  const total = usage.inputTokens + usage.outputTokens;
+  const parts = [`${k(total)} tokens`];
+  if (usage.cachedInputTokens) parts.push(`${k(usage.cachedInputTokens)} de caché`);
+  if (usage.reasoningTokens) parts.push(`${k(usage.reasoningTokens)} razonando`);
+  if (usage.costUsd !== undefined) parts.push(`~$${usage.costUsd.toFixed(usage.costUsd < 0.1 ? 3 : 2)}`);
+  return parts.join(" · ");
+}
+
+export function modelLabel(task: TaskView): string {
+  const requested = task.selection;
+  const confirmed = task.modelState;
+  let fallbackThinking = "thinking predeterminado";
+  if (task.engine === "codex") {
+    try { fallbackThinking = `thinking ${defaultEffort()} (predeterminado del orquestador)`; } catch { /* invalid env: keep generic */ }
+  }
+  return safeText([
+    task.engine === "codex" ? "OpenAI / Codex" : task.engine === "claude" ? "Claude" : "Antigravity",
+    confirmed?.model ? `${confirmed.model} (confirmado)` : requested?.model ? `${requested.model} (solicitado)` : "modelo predeterminado",
+    confirmed?.thinking ? `thinking ${confirmed.thinking} (confirmado)` : requested?.thinking ? `thinking ${requested.thinking} (solicitado)` : fallbackThinking,
+    task.permissionMode === "yolo" ? "YOLO autorizado (esta tarea)" : "permisos restringidos",
+  ].join(" · ")).replace(/\n/g, " ");
+}
+
+/** Spanish wording for the human; the raw message is kept for machines and expanded views. */
+export function friendlyError(error: string): string {
+  const rules: [RegExp, string][] = [
+    [/MCP isolation could not be verified; inherited servers active: (.+)/, "No se pudo aislar Codex: siguen activos servidores MCP heredados ($1). La tarea se detuvo antes de empezar."],
+    [/Task deadline exceeded/, "Se agotó el plazo de la tarea (PI_ORCHESTRATOR_TASK_TIMEOUT_MS)."],
+    [/Cancelled by owner/, "Cancelada por ti."],
+    [/Parent execution ended/, "Su tarea padre terminó antes que ella."],
+    [/Pi session closed/, "Se cerró la sesión de Pi."],
+    [/Aggregate runtime budget exhausted/, "Se agotó el presupuesto total de tiempo de ejecución."],
+    [/Concurrency limit reached/, "Límite de tareas simultáneas alcanzado; espera a que termine alguna."],
+    [/Total task limit reached/, "Límite de tareas de esta sesión alcanzado (PI_ORCHESTRATOR_MAX_TASKS); usa /orch reset."],
+    [/Delegation depth limit reached/, "Límite de profundidad de delegación alcanzado."],
+    [/Runtime returned no result/, "El motor terminó sin devolver texto."],
+    [/Runtime cleanup could not be confirmed/, "No se pudo confirmar el cierre de los procesos del motor."],
+    [/Codex RPC timeout: (.+)/, "Codex no respondió a tiempo ($1)."],
+    [/Claude error_max_turns|max.?turns/i, "Claude alcanzó su límite de turnos (PI_ORCHESTRATOR_CLAUDE_MAX_TURNS)."],
+    [/Claude error_max_budget|max.?budget/i, "Claude alcanzó su presupuesto por tarea (--max-budget-usd)."],
+  ];
+  const text = safeText(error);
+  for (const [pattern, label] of rules) if (pattern.test(text)) return text.replace(new RegExp(`^[\\s\\S]*?${pattern.source}[\\s\\S]*$`, pattern.flags), label);
+  return text;
+}
+
+export function failureAdvice(task: TaskView): string {
+  if (task.error && /MCP isolation could not be verified/.test(task.error)) return "Revisa que tu ~/.codex/config.toml no fuerce esos servidores; no relajes el aislamiento para reintentar.";
+  const category = task.diagnostic?.category ?? "unknown";
+  return {
+    authentication: "Autentica este motor con su propia cuenta antes de volver a delegar.",
+    network: "Comprueba la conexión y el estado de las subtareas antes de reintentar: podría duplicarse trabajo.",
+    quota: "Comprueba la cuota de la cuenta o espera a que se restablezca. No se cambió de cuenta ni de modelo.",
+    protocol: "Comprueba la compatibilidad de esta versión del motor; no relajes las validaciones.",
+    cleanup: "El cierre no está confirmado. No reutilices esta sesión ni des por cancelados sus procesos.",
+    unknown: "Consulta los detalles antes de iniciar otro intento. No hubo reintento automático.",
+  }[category];
+}
+
+/** Technical one-liner with the short ID: archives, history and the transcript. */
+export function taskLine(task: TaskView, prefix = "", attention?: Attention): string {
+  return `${prefix}${stateIcon[task.state]} ${task.engine} ${task.id.slice(0, 8)} · ${taskPhase(task, attention)} · ${oneLine(task.title)}`;
+}
+
+/**
+ * Width-bounded plain text with "…". Unlike truncateToWidth it emits no ANSI
+ * reset, so a row coloured by the caller keeps its colour after the ellipsis.
+ */
+export function clip(text: string, width: number): string {
+  if (width <= 0) return "";
+  if (visibleWidth(text) <= width) return text;
+  let out = "";
+  for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)) {
+    if (visibleWidth(out + segment) > width - 1) break;
+    out += segment;
+  }
+  return `${out}…`;
+}
+
+/** Human row for the widget and panel: no IDs; title shrinks first so status stays visible. */
+export function taskRow(task: TaskView, prefix: string, width: number, tasks: TaskView[] = [], attention?: Attention, now = Date.now()): string {
+  const detail = taskDetail(task, tasks, attention, now).text;
+  const right = [taskPhase(task, attention), detail, elapsed(task, now)].filter(Boolean).join(" · ");
+  const left = `${prefix}${stateIcon[task.state]} ${engineName(task.engine).padEnd(6)} `;
+  const room = Math.max(8, width - visibleWidth(left) - visibleWidth(right) - 2);
+  const title = clip(oneLine(task.title), room);
+  return clip(`${left}${title}${" ".repeat(Math.max(1, room - visibleWidth(title) + 1))} ${right}`, Math.max(1, width));
+}
+
+/** Card sections, so the TUI can render a completed result as markdown. All strings are sanitized. */
+export function taskCardParts(task: TaskView, expanded = false, attention?: Attention): { head: string; body?: { text: string; markdown: boolean }; tail: string } {
+  const result = safeText(task.error ? friendlyError(task.error) : task.result ?? "");
+  const preview = expanded || result.length <= 480 ? result : `${result.slice(0, 480)}…`;
+  const tokens = formatTokens(task.usage);
+  const head = [
+    `${stateIcon[task.state]} ${taskPhase(task, attention)} · ${elapsed(task)}${tokens ? ` · ${tokens}` : ""}`,
+    oneLine(task.title), modelLabel(task),
+  ];
+  if (!isTerminal(task) && task.lastActivity) head.push(`Última acción reportada por el motor: ${activityLabel(task.lastActivity)}`);
+  const tail: string[] = [];
+  if (task.state === "failed") tail.push(failureAdvice(task));
+  if (expanded) {
+    tail.push(`Tarea: ${task.id} · intento: ${task.attemptId}`, `Workspace: ${safeText(task.cwd)}`, `Sesión nativa: ${safeText(task.runtimeSessionId ?? "no registrada")}`);
+    if (task.error && friendlyError(task.error) !== safeText(task.error)) tail.push(`Error original: ${safeText(task.error)}`);
+    if (task.selection?.model && task.modelState?.model && task.selection.model !== task.modelState.model) tail.push(`Modelo solicitado: ${safeText(task.selection.model)}`);
+  } else tail.push(`/orch result ${task.id.slice(0, 8)} · /orch abre el panel${result.length > 480 ? " · expande para leer más" : ""}`);
+  return {
+    head: safeText(head.join("\n")),
+    ...(preview ? { body: { text: task.error ? `Motivo: ${preview}` : preview, markdown: !task.error && task.state === "completed" } } : {}),
+    tail: safeText(tail.join("\n")),
+  };
+}
+
+/** Shared plain-text card for the transcript and TUI; technical identities are opt-in. */
+export function taskCard(task: TaskView, expanded = false, attention?: Attention): string {
+  const parts = taskCardParts(task, expanded, attention);
+  return [parts.head, ...(parts.body ? ["", parts.body.text] : []), "", parts.tail].join("\n");
+}
+export function elapsed(task: TaskView, now = Date.now()): string {
+  return short((task.endedAt ? Date.parse(task.endedAt) : now) - Date.parse(task.createdAt));
+}
+export function subtree(tasks: TaskView[], id: string): TaskView[] {
+  const ids = new Set([id]);
+  let size: number;
+  do {
+    size = ids.size;
+    for (const task of tasks) if (task.parentId && ids.has(task.parentId)) ids.add(task.id);
+  } while (size !== ids.size);
+  return tasks.filter((task) => ids.has(task.id));
+}
+export function resolveTask(tasks: TaskView[], reference: string): TaskView {
+  const exact = tasks.find((task) => task.id === reference);
+  if (exact) return exact;
+  const matches = reference.length >= 8 ? tasks.filter((task) => task.id.startsWith(reference)) : [];
+  if (matches.length !== 1) throw new Error(matches.length ? "Identificador ambiguo; utiliza el ID completo" : "Tarea desconocida; utiliza el ID o un prefijo de al menos 8 caracteres");
+  return matches[0]!;
+}
+
+/**
+ * Permission/question details arrive as runtime JSON. Show what will happen —
+ * command and paths first — instead of a raw blob. Untrusted: sanitized and bounded.
+ */
+export function formatInteractionDetail(detail: string): string {
+  let parsed: unknown;
+  try { parsed = JSON.parse(detail); } catch { return safeText(detail).slice(0, 4_000); }
+  if (!parsed || typeof parsed !== "object") return safeText(String(parsed)).slice(0, 4_000);
+  const { request, input } = parsed as { request?: unknown; input?: unknown };
+  const lines: string[] = [];
+  if (typeof request === "string" && request.trim()) lines.push(`Solicitud: ${oneLine(request).slice(0, 400)}`);
+  const flat: [string, string][] = [];
+  const walk = (value: unknown, path: string, depth: number) => {
+    if (flat.length >= 24) return;
+    if (value === null || value === undefined) return;
+    if (typeof value !== "object") { flat.push([path, String(value)]); return; }
+    if (depth >= 3) { flat.push([path, JSON.stringify(value).slice(0, 200)]); return; }
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) walk(child, path ? `${path}.${key}` : key, depth + 1);
+  };
+  walk(input ?? (request === undefined ? parsed : {}), "", 0);
+  const weight = (key: string) => /command|cmd|commandline|script|code/i.test(key) ? 0 : /path|file|cwd|dir|url|target/i.test(key) ? 1 : 2;
+  const label = (key: string) => /command|cmd|commandline/i.test(key) ? "Comando" : /path|file/i.test(key) ? "Archivo" : /cwd|dir/i.test(key) ? "Directorio" : /url/i.test(key) ? "URL" : key;
+  for (const [key, value] of flat.sort((a, b) => weight(a[0]) - weight(b[0]))) {
+    const text = safeText(value);
+    const shown = text.length > 600 ? `${text.slice(0, 600)}… (${text.length} caracteres)` : text;
+    lines.push(weight(key) === 0 ? `${label(key)}:\n  ${shown.replace(/\n/g, "\n  ")}` : `${label(key)}: ${shown.replace(/\n/g, " ")}`);
+  }
+  return lines.length ? lines.join("\n") : "El motor no envió detalles de la operación. Deniega si no puedes verificarla.";
+}
+
+export function helpText(advanced: string): string {
+  return [
+    "Uso: /orch INSTRUCCIÓN en lenguaje natural",
+    "  /orch delega a agy 3.8 flash high para explorar este repo sin modificar archivos",
+    "  /orch usa codex high para revisar los tests y claude para resumir el README",
+    "",
+    "Panel: /orch (o /orch panel)",
+    "  ↑↓ elegir · s redirigir · r reanudar · R reintentar · e editor · i insertar en el chat",
+    "  y copiar · c cancelar · d detalles · f filtro · PgUp/PgDn leer · Esc volver",
+    "",
+    "Comandos: status · result ID · cancel ID · usage · engines · history · reset",
+    "Avanzado:",
+    `  ${advanced.split(" | ").join("\n  ")}`,
+    "",
+    "Variables: PI_ORCHESTRATOR_TASK_TIMEOUT_MS · PI_ORCHESTRATOR_CODEX_DEFAULT_THINKING ·",
+    "  PI_ORCHESTRATOR_CLAUDE_MAX_TURNS · PI_ORCHESTRATOR_MAX_TASKS · PI_ORCHESTRATOR_NOTIFY (desktop|bell|off)",
+  ].join("\n");
+}
+
+export function usageReport(usage: { runtimeMs: number; maxRuntimeMs?: number; activeSlots: number; tasks: number; queued: number; maxTasks: number; maxConcurrent: number } | undefined, tasks: TaskView[]): string {
+  const lines = ["Uso del orquestador"];
+  if (!usage) lines.push("Aún no se ha iniciado ninguna tarea en esta sesión.");
+  else {
+    lines.push(`Tareas: ${usage.tasks}/${usage.maxTasks} · simultáneas ${usage.activeSlots}/${usage.maxConcurrent}${usage.queued ? ` · ${usage.queued} en cola` : ""}`);
+    lines.push(`Tiempo de ejecución acumulado: ${short(usage.runtimeMs)}${usage.maxRuntimeMs ? ` de ${short(usage.maxRuntimeMs)}` : ""}`);
+  }
+  const reported = tasks.filter((task) => task.usage);
+  if (reported.length) {
+    const total = reported.reduce<TaskUsage>((sum, task) => ({
+      inputTokens: sum.inputTokens + task.usage!.inputTokens, cachedInputTokens: sum.cachedInputTokens + task.usage!.cachedInputTokens,
+      outputTokens: sum.outputTokens + task.usage!.outputTokens, reasoningTokens: (sum.reasoningTokens ?? 0) + (task.usage!.reasoningTokens ?? 0),
+      ...(sum.costUsd !== undefined || task.usage!.costUsd !== undefined ? { costUsd: (sum.costUsd ?? 0) + (task.usage!.costUsd ?? 0) } : {}),
+    }), { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
+    lines.push(`Tokens reportados por los motores: ${formatTokens(total)} (${reported.length} de ${tasks.length} tareas)`);
+    for (const engine of ["codex", "claude", "antigravity"] as const) {
+      const own = reported.filter((task) => task.engine === engine);
+      if (own.length) lines.push(`  ${engineName(engine)}: ${formatTokens(own.reduce<TaskUsage>((sum, task) => ({ inputTokens: sum.inputTokens + task.usage!.inputTokens, cachedInputTokens: sum.cachedInputTokens + task.usage!.cachedInputTokens, outputTokens: sum.outputTokens + task.usage!.outputTokens }), { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 }))}`);
+    }
+  } else if (tasks.length) lines.push("Ningún motor ha reportado tokens todavía (Antigravity no los informa).");
+  lines.push("No es una factura: son los contadores que informa cada motor.");
+  return lines.join("\n");
+}

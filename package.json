@@ -1,0 +1,43 @@
+{
+  "name": "pi-orchestrator-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Experimental session-scoped orchestration of Codex and Claude Code from Pi",
+  "pi": {
+    "extensions": [
+      "./src/extension.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "smoke:live": "tsx scripts/live-smoke.ts",
+    "smoke:cancel": "tsx scripts/live-cancel.ts",
+    "smoke:cases": "tsx scripts/live-cases.ts",
+    "antigravity:install": "python3 scripts/install-antigravity.py",
+    "antigravity:probe": "python3 scripts/probe-antigravity.py",
+    "antigravity:auth": "python3 scripts/auth-antigravity.py",
+    "test:installer": "python3 test/antigravity_installer_test.py",
+    "smoke:antigravity": "tsx scripts/live-antigravity.ts",
+    "smoke:antigravity-nested": "tsx scripts/live-antigravity-nested.ts",
+    "test:tui": "python3 test/tui_harness_test.py && python3 scripts/tui-smoke.py"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "^4.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "^1.4.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
