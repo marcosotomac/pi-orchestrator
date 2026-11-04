@@ -63,6 +63,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
             _meta: { is_mcp_tool_call: scenario !== 'bridge-no-mcp', mcp: { server: scenario === 'bridge-foreign-server' ? 'external' : 'pi_orchestrator', tool } } },
           options: [{ optionId: 'once', kind: scenario === 'bridge-only-always' ? 'allow_always' : 'allow_once' }] } });
       }
+      // Shape measured live (Antigravity 1.4.5): native commands arrive as kind=execute with rawInput.CommandLine.
+      if (scenario === 'readonly') return send({ id: 'readonly-1', method: 'session/request_permission', params: { sessionId: 'fixture-session', toolCall: { toolCallId: 'cmd-1', kind: process.env.ORCH_ACP_FIXTURE_KIND || 'execute', title: process.env.ORCH_ACP_FIXTURE_COMMAND, rawInput: { CommandLine: process.env.ORCH_ACP_FIXTURE_COMMAND, Cwd: process.cwd(), WaitMsBeforeAsync: 500 } }, options: [{ optionId: 'once', name: 'Allow', kind: 'allow_once' }, { optionId: 'always', name: 'Always', kind: 'allow_always' }, { optionId: 'reject', name: 'Reject', kind: 'reject_once' }] } });
       if (scenario === 'many-denials') { for (let n = 1; n <= 9; n++) send({ id: `deny-${n}`, method: 'session/request_permission', params: { sessionId: 'fixture-session', toolCall: { toolCallId: `tool-${n}` }, options: [{ optionId: 'allow', kind: 'allow_once' }] } }); return; }
       if (scenario === 'hang') return;
       if (scenario === 'early-exit') return process.exit(0);
@@ -96,6 +98,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (scenario !== 'human-deny') {
         assert.equal(message.result.outcome.optionId, 'once');
         send({ method: 'session/update', params: { sessionId: 'fixture-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'fixture answer' } } } });
+        send({ id: promptId, result: { stopReason: 'end_turn' } });
+      } else finishAfterDenial();
+    }
+    if (id === 'readonly-1') {
+      if (message.result.outcome.outcome === 'selected') {
+        assert.equal(message.result.outcome.optionId, 'once', 'never a persistent grant');
+        send({ method: 'session/update', params: { sessionId: 'fixture-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'approved' } } } });
         send({ id: promptId, result: { stopReason: 'end_turn' } });
       } else finishAfterDenial();
     }

@@ -7,6 +7,7 @@ import { RuntimeProcess } from "./process.ts";
 import { activityText, commandTarget, pathTarget } from "../activity.ts";
 import { antigravityEnvironment } from "../antigravity-profile.ts";
 import { detectAntigravity } from "../antigravity-installation.ts";
+import { readOnlyAutoApproval, readOnlyCommand } from "../readonly-commands.ts";
 
 const MAX_DENIALS = 8;
 
@@ -56,6 +57,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
 
   async run(ctx: RuntimeContext): Promise<string> {
     const yolo = validatePermissionMode(ctx.task.permissionMode) === "yolo";
+    const autoReadOnly = readOnlyAutoApproval();
     if (!this.enabled) throw new Error("Antigravity ACP execution is explicitly disabled; remove PI_ORCHESTRATOR_ANTIGRAVITY_EXPERIMENTAL=0 or set it to 1");
     if (!this.executable || !isAbsolute(this.executable)) throw new Error("Set PI_ORCHESTRATOR_ANTIGRAVITY_ACP to an absolute official ACP executable; agy CLI is not ACP");
     try { accessSync(this.executable, constants.X_OK); }
@@ -129,15 +131,17 @@ export class AntigravityAdapter implements RuntimeAdapter {
                   params.options.some((option: any) => !option || typeof option.optionId !== "string" || !option.optionId.length || option.optionId.length > 128) ||
                   new Set(params.options.map((option: any) => option.optionId)).size !== params.options.length) throw new Error("Invalid Antigravity permission options");
             }
-            const allow = local && !question && (scopedBridge || yolo) ? params.options.find((option: any) => option.kind === "allow_once") : undefined;
+            // Restricted tasks: a recognised read-only inspection command (ls, du, git log…) needs no human.
+            const inspection = local && !question && !yolo && !scopedBridge && autoReadOnly && call.kind === "execute" ? readOnlyCommand(call.rawInput?.CommandLine) : undefined;
+            const allow = local && !question && (scopedBridge || yolo || inspection?.ok) ? params.options.find((option: any) => option.kind === "allow_once") : undefined;
             if (allow) {
               runtime.send({ jsonrpc: "2.0", id: message.id, result: { outcome: { outcome: "selected", optionId: allow.optionId } } });
-              ctx.activity(yolo && !scopedBridge ? "antigravity: task-authorized YOLO approval (once)" : "antigravity: scoped bridge approval");
+              ctx.activity(inspection?.ok ? `antigravity: read-only command auto-approved (${inspection.commands.join(" | ")})` : yolo && !scopedBridge ? "antigravity: task-authorized YOLO approval (once)" : "antigravity: scoped bridge approval");
               return; // Task-local only; persistent grants are never selected.
             }
             if (ctx.interact && local && (!yolo || question)) {
               const choices = params.options.filter((option: any) => question || option.kind === "allow_once");
-              const detail = JSON.stringify({ request: call._meta?.prompt ?? call.title, input: call.rawInput ?? {} });
+              const detail = JSON.stringify({ request: call._meta?.prompt ?? call.title, ...(typeof call.kind === "string" ? { kind: call.kind.slice(0, 32) } : {}), input: call.rawInput ?? {} });
               ctx.activity(question ? "antigravity: waiting for user answer" : "antigravity: waiting for human permission");
               void ctx.interact({ kind: question ? "question" : "permission", title: typeof call.title === "string" ? call.title : "Runtime request", detail,
                 options: choices.map((option: any) => ({ id: option.optionId, label: option.name ?? option.kind })) }).then((answer) => {
