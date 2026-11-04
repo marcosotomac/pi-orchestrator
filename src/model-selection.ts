@@ -1,3 +1,5 @@
+import { configOptionSchema, modelSessionSchema } from "./acp-schema.ts";
+
 export interface ModelSelection {
   model?: string;
   thinking?: string;
@@ -23,41 +25,45 @@ export function validateSelection(
   return { ...selection };
 }
 
-function values(option: any): { id: string; name: string }[] {
-  if (!Array.isArray(option?.options)) return [];
-  return option.options
-    .flatMap((item: any) =>
-      Array.isArray(item.options)
-        ? values(item)
-        : typeof item.value === "string" &&
-            /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(item.value)
-          ? [
-              {
-                id: item.value,
-                name:
-                  typeof item.name === "string"
-                    ? item.name.slice(0, 160)
-                    : item.value,
-              },
-            ]
-          : [],
-    )
+function values(input: unknown, depth = 0): { id: string; name: string }[] {
+  if (depth > 16) throw new Error("ACP option nesting limit exceeded");
+  const parsed = configOptionSchema.safeParse(input);
+  if (!parsed.success || !parsed.data.options) return [];
+  return parsed.data.options
+    .slice(0, 128)
+    .flatMap((input) => {
+      const parsed = configOptionSchema.safeParse(input);
+      if (!parsed.success) return [];
+      const item = parsed.data;
+      if (item.options) return values(item, depth + 1);
+      return typeof item.value === "string" &&
+        /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(item.value)
+        ? [
+            {
+              id: item.value,
+              name:
+                typeof item.name === "string"
+                  ? item.name.slice(0, 160)
+                  : item.value,
+            },
+          ]
+        : [];
+    })
     .slice(0, 128);
 }
 
 /** ACP 1.4 separates model and thought_level; no guessed legacy suffixes or fallback. */
 export async function selectAcpModel(
-  session: any,
+  input: unknown,
   selection: ModelSelection,
-  request: (method: string, params: any) => Promise<any>,
+  request: (method: string, params: unknown) => Promise<unknown>,
   sessionId: string,
 ): Promise<ModelState> {
-  let config = Array.isArray(session?.configOptions)
-    ? session.configOptions
-    : [];
+  const session = modelSessionSchema.parse(input);
+  let config = session.configOptions ?? [];
   const option = (category: string) =>
     config.find(
-      (item: any) =>
+      (item) =>
         item.type === "select" &&
         (item.category === category || item.id === category),
     );
@@ -81,16 +87,18 @@ export async function selectAcpModel(
         "Requested Antigravity model is unavailable; no fallback was used",
       );
     const modelOption = option("model");
-    const response = modelOption
-      ? await request("session/set_config_option", {
-          sessionId,
-          configId: modelOption.id,
-          value: selection.model,
-        })
-      : await request("session/set_model", {
-          sessionId,
-          modelId: selection.model,
-        });
+    const response = modelSessionSchema.parse(
+      modelOption
+        ? await request("session/set_config_option", {
+            sessionId,
+            configId: modelOption.id,
+            value: selection.model,
+          })
+        : await request("session/set_model", {
+            sessionId,
+            modelId: selection.model,
+          }),
+    );
     if (Array.isArray(response?.configOptions)) config = response.configOptions;
     if (modelOption && option("model")?.currentValue !== selection.model)
       throw new Error("Antigravity did not confirm the requested model");
@@ -109,11 +117,13 @@ export async function selectAcpModel(
       throw new Error(
         "Requested Antigravity thinking level is unavailable; no fallback was used",
       );
-    const response = await request("session/set_config_option", {
-      sessionId,
-      configId: setting.id,
-      value: selection.thinking,
-    });
+    const response = modelSessionSchema.parse(
+      await request("session/set_config_option", {
+        sessionId,
+        configId: setting.id,
+        value: selection.thinking,
+      }),
+    );
     if (!Array.isArray(response?.configOptions))
       throw new Error("Antigravity did not confirm thinking configuration");
     config = response.configOptions;

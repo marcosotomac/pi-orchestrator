@@ -15,6 +15,14 @@ import { antigravityEnvironment } from "../antigravity-profile.ts";
 import { detectAntigravity } from "../antigravity-installation.ts";
 import { readOnlyAutoApproval, readOnlyCommand } from "../readonly-commands.ts";
 
+import {
+  initializedSchema,
+  sessionSchema,
+  promptResultSchema,
+  permissionSchema,
+  updateSchema,
+} from "../acp-schema.ts";
+
 const MAX_DENIALS = 8;
 
 /** ACP only. Never falls back to agy --print or edits a global MCP/auth profile. */
@@ -47,7 +55,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
     );
     const pending = new Map<
       number,
-      { resolve: (value: any) => void; reject: (error: Error) => void }
+      { resolve: (value: unknown) => void; reject: (error: Error) => void }
     >();
     let failure: Error | undefined,
       id = 0;
@@ -77,7 +85,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
       else waiter.resolve(message.result);
     };
     const request = (method: string, params: unknown) =>
-      new Promise<any>((resolve, reject) => {
+      new Promise<unknown>((resolve, reject) => {
         if (failure) {
           reject(failure);
           return;
@@ -100,25 +108,29 @@ export class AntigravityAdapter implements RuntimeAdapter {
         runtime.send({ jsonrpc: "2.0", id: key, method, params });
       });
     try {
-      const initialized = await request("initialize", {
-        protocolVersion: 1,
-        clientCapabilities: {
-          fs: { readTextFile: false, writeTextFile: false },
-          terminal: false,
-        },
-        clientInfo: { name: "pi-orchestrator", version: "0.1.0" },
-      });
+      const initialized = initializedSchema.parse(
+        await request("initialize", {
+          protocolVersion: 1,
+          clientCapabilities: {
+            fs: { readTextFile: false, writeTextFile: false },
+            terminal: false,
+          },
+          clientInfo: { name: "pi-orchestrator", version: "0.1.0" },
+        }),
+      );
       if (
         initialized?.protocolVersion !== 1 ||
         initialized.agentInfo?.name !== "antigravity-acp"
       )
         throw new Error("Antigravity ACP identity or protocol unavailable");
       await request("authenticate", { methodId: "oauth-personal" });
-      const session = await request("session/new", {
-        cwd,
-        _meta: { antigravity: { disabledTools: ["run_workflow"] } },
-        mcpServers: [],
-      });
+      const session = sessionSchema.parse(
+        await request("session/new", {
+          cwd,
+          _meta: { antigravity: { disabledTools: ["run_workflow"] } },
+          mcpServers: [],
+        }),
+      );
       if (typeof session?.sessionId !== "string")
         throw new Error("Antigravity ACP returned no session");
       const state = await selectAcpModel(
@@ -168,7 +180,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
     const interactionIds = new Set<string | number>();
     const pending = new Map<
       number,
-      { resolve: (value: any) => void; reject: (error: Error) => void }
+      { resolve: (value: unknown) => void; reject: (error: Error) => void }
     >();
     let promptRequestId: number | undefined;
     let nextId = 0,
@@ -189,9 +201,10 @@ export class AntigravityAdapter implements RuntimeAdapter {
           `Antigravity kept requesting unapproved operations (${denials} denied)`,
         );
     };
-    const early: any[] = [];
+    const early: unknown[] = [];
     let earlyBytes = 0;
-    const onUpdate = (params: any) => {
+    const onUpdate = (input: unknown) => {
+      const params = updateSchema.parse(input);
       if (!sessionId || params?.sessionId !== sessionId)
         throw new Error("Antigravity update has unknown session");
       const update = params?.update;
@@ -242,7 +255,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
       for (const request of pending.values()) request.reject(protocolError);
       pending.clear();
     };
-    const request = (method: string, params: unknown): Promise<any> =>
+    const request = (method: string, params: unknown): Promise<unknown> =>
       new Promise((resolve, reject) => {
         if (protocolError) {
           reject(protocolError);
@@ -282,7 +295,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
               throw new Error(
                 "Invalid Antigravity permission request identity",
               );
-            const params = message.params;
+            const params = permissionSchema.parse(message.params);
             const call = params?.toolCall;
             const tool = call?._meta?.mcp?.tool;
             const scopedBridge =
@@ -292,7 +305,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
               !call.toolCallId.startsWith("interaction_") &&
               call?._meta?.is_mcp_tool_call === true &&
               call?._meta?.mcp?.server === "pi_orchestrator" &&
-              ["delegate", "status", "wait", "cancel"].includes(tool) &&
+              ["delegate", "status", "wait", "cancel"].includes(tool ?? "") &&
               call.title === `pi_orchestrator_${tool}`;
             const local =
               prompting &&
@@ -303,7 +316,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
               typeof call?.toolCallId === "string" &&
               call.toolCallId.length > 0;
             const question =
-              local && call.toolCallId.startsWith("interaction_");
+              local && call.toolCallId?.startsWith("interaction_") === true;
             if (local) {
               if (interactionIds.size >= 128 || interactionIds.has(message.id))
                 throw new Error(
@@ -315,13 +328,13 @@ export class AntigravityAdapter implements RuntimeAdapter {
                 params.options.length < 1 ||
                 params.options.length > 128 ||
                 params.options.some(
-                  (option: any) =>
+                  (option) =>
                     !option ||
                     typeof option.optionId !== "string" ||
                     !option.optionId.length ||
                     option.optionId.length > 128,
                 ) ||
-                new Set(params.options.map((option: any) => option.optionId))
+                new Set(params.options.map((option) => option.optionId))
                   .size !== params.options.length
               )
                 throw new Error("Invalid Antigravity permission options");
@@ -338,9 +351,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
                 : undefined;
             const allow =
               local && !question && (scopedBridge || yolo || inspection?.ok)
-                ? params.options.find(
-                    (option: any) => option.kind === "allow_once",
-                  )
+                ? params.options.find((option) => option.kind === "allow_once")
                 : undefined;
             if (allow) {
               runtime.send({
@@ -361,7 +372,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
             }
             if (ctx.interact && local && (!yolo || question)) {
               const choices = params.options.filter(
-                (option: any) => question || option.kind === "allow_once",
+                (option) => question || option.kind === "allow_once",
               );
               const detail = JSON.stringify({
                 request: call._meta?.prompt ?? call.title,
@@ -383,7 +394,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
                       ? call.title
                       : "Runtime request",
                   detail,
-                  options: choices.map((option: any) => ({
+                  options: choices.map((option) => ({
                     id: option.optionId,
                     label: option.name ?? option.kind,
                   })),
@@ -433,7 +444,9 @@ export class AntigravityAdapter implements RuntimeAdapter {
                     ? "non-mcp-tool"
                     : call?._meta?.mcp?.server !== "pi_orchestrator"
                       ? "foreign-server"
-                      : !["delegate", "status", "wait", "cancel"].includes(tool)
+                      : !["delegate", "status", "wait", "cancel"].includes(
+                            tool ?? "",
+                          )
                         ? "unknown-tool"
                         : call.title !== `pi_orchestrator_${tool}`
                           ? "title-mismatch"
@@ -499,14 +512,16 @@ export class AntigravityAdapter implements RuntimeAdapter {
       if (!stopping) fail(new Error("Antigravity ACP process closed"));
     });
     try {
-      const initialized = await request("initialize", {
-        protocolVersion: 1,
-        clientCapabilities: {
-          fs: { readTextFile: false, writeTextFile: false },
-          terminal: false,
-        },
-        clientInfo: { name: "pi-orchestrator", version: "0.1.0" },
-      });
+      const initialized = initializedSchema.parse(
+        await request("initialize", {
+          protocolVersion: 1,
+          clientCapabilities: {
+            fs: { readTextFile: false, writeTextFile: false },
+            terminal: false,
+          },
+          clientInfo: { name: "pi-orchestrator", version: "0.1.0" },
+        }),
+      );
       if (
         initialized?.protocolVersion !== 1 ||
         initialized.agentInfo?.name !== "antigravity-acp" ||
@@ -524,9 +539,8 @@ export class AntigravityAdapter implements RuntimeAdapter {
       )
         throw new Error("Antigravity ACP does not advertise native resume");
       sessionId = ctx.resumeSessionId;
-      const session = await request(
-        ctx.resumeSessionId ? "session/resume" : "session/new",
-        {
+      const session = sessionSchema.parse(
+        await request(ctx.resumeSessionId ? "session/resume" : "session/new", {
           ...(ctx.resumeSessionId ? { sessionId: ctx.resumeSessionId } : {}),
           cwd: ctx.task.cwd,
           _meta: { antigravity: { disabledTools: ["run_workflow"] } },
@@ -540,7 +554,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
               ],
             },
           ],
-        },
+        }),
       );
       if (ctx.resumeSessionId) {
         if (
@@ -559,9 +573,7 @@ export class AntigravityAdapter implements RuntimeAdapter {
       if (
         (!ctx.resumeSessionId || session?.modes !== undefined) &&
         (!Array.isArray(session?.modes?.availableModes) ||
-          !session.modes.availableModes.some(
-            (mode: any) => mode.id === "default",
-          ))
+          !session.modes.availableModes.some((mode) => mode.id === "default"))
       )
         throw new Error(
           "Antigravity ACP does not advertise required approval mode",
@@ -578,10 +590,12 @@ export class AntigravityAdapter implements RuntimeAdapter {
       prompting = true;
       // No WORKER_CONTRACT here: appended to the prompt it made Antigravity reach for
       // approval-gated tools; restricted nested tasks then failed (measured 0/4 vs 6/6).
-      const result = await request("session/prompt", {
-        sessionId,
-        prompt: [{ type: "text", text: ctx.prompt }],
-      });
+      const result = promptResultSchema.parse(
+        await request("session/prompt", {
+          sessionId,
+          prompt: [{ type: "text", text: ctx.prompt }],
+        }),
+      );
       prompting = false;
       if (result?.stopReason !== "end_turn" || !output.trim())
         throw new Error("Antigravity ACP turn did not complete with text");
