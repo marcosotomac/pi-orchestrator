@@ -363,7 +363,7 @@ export class Orchestrator {
         context: (used, size) => {
           if (isTerminal(entry.view) || !this.identities.has(entry.tokenHash)) return;
           if (!Number.isSafeInteger(used) || !Number.isSafeInteger(size) || used < 0 || size < 1 || used > size * 4) return;
-          entry.view.context = { used, size };
+          entry.view.context = { used, size, peak: Math.max(used, entry.view.context?.peak ?? 0) };
           this.emit("context", entry, undefined, false);
         },
         partial: (text) => {
@@ -585,15 +585,22 @@ export class Orchestrator {
   }
 
   /** Provider-reported spend so far: tokens from every engine, dollars only where reported (Claude). */
-  spend(): { tokens: number; costUsd: number; costEngines: string[] } {
-    let tokens = 0, costUsd = 0;
-    const costEngines = new Set<string>();
+  spend(): { tokens: number; costUsd: number; costEngines: string[]; estimatedTokens: number; estimatedEngines: string[] } {
+    let tokens = 0, costUsd = 0, estimatedTokens = 0;
+    const costEngines = new Set<string>(), estimatedEngines = new Set<string>();
     for (const { view } of this.entries.values()) {
-      if (!view.usage) continue;
+      if (!view.usage) {
+        // Antigravity reports no token usage, only context occupancy. Its peak is a
+        // lower bound of the input tokens billed (every model call resends at least
+        // that much), so the token guard is no longer blind to those tasks.
+        const peak = view.context?.peak ?? view.context?.used;
+        if (peak !== undefined) { tokens += peak; estimatedTokens += peak; estimatedEngines.add(view.engine); }
+        continue;
+      }
       tokens += view.usage.inputTokens + view.usage.outputTokens;
       if (view.usage.costUsd !== undefined) { costUsd += view.usage.costUsd; costEngines.add(view.engine); }
     }
-    return { tokens, costUsd, costEngines: [...costEngines] };
+    return { tokens, costUsd, costEngines: [...costEngines], estimatedTokens, estimatedEngines: [...estimatedEngines] };
   }
 
   private assertSpendAvailable(): void {

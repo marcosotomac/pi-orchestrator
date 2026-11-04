@@ -72,7 +72,8 @@ export interface TaskView {
   /** Operator-granted internet access for this task (search/fetch tools); never inherited. */
   web?: boolean;
   /** Context window occupancy a runtime reports (Antigravity usage_update); not consumption. */
-  context?: { used: number; size: number };
+  /** Context occupancy the runtime reports; `peak` is the largest `used` seen (an input-token lower bound when no usage is reported). */
+  context?: { used: number; size: number; peak?: number };
   /** "worktree": a YOLO root isolated in a private checkout; "in-place": not a git repo. */
   workspace?: "worktree" | "in-place";
   changes?: import("./workspace.ts").TaskChanges;

@@ -445,13 +445,13 @@ export function helpText(advanced: string): string {
   ].join("\n");
 }
 
-export function usageReport(usage: { runtimeMs: number; maxRuntimeMs?: number; activeSlots: number; tasks: number; queued: number; maxTasks: number; maxConcurrent: number; maxTokens?: number; maxCostUsd?: number; spend?: { tokens: number; costUsd: number } } | undefined, tasks: TaskView[]): string {
+export function usageReport(usage: { runtimeMs: number; maxRuntimeMs?: number; activeSlots: number; tasks: number; queued: number; maxTasks: number; maxConcurrent: number; maxTokens?: number; maxCostUsd?: number; spend?: { tokens: number; costUsd: number; estimatedTokens?: number } } | undefined, tasks: TaskView[]): string {
   const lines = ["Uso del orquestador"];
   if (!usage) lines.push("Aún no se ha iniciado ninguna tarea en esta sesión.");
   else {
     lines.push(`Tareas: ${usage.tasks}/${usage.maxTasks} · simultáneas ${usage.activeSlots}/${usage.maxConcurrent}${usage.queued ? ` · ${usage.queued} en cola` : ""}`);
     lines.push(`Tiempo de ejecución acumulado: ${short(usage.runtimeMs)}${usage.maxRuntimeMs ? ` de ${short(usage.maxRuntimeMs)}` : ""}`);
-    if (usage.maxTokens !== undefined && usage.spend) lines.push(`Tope de tokens: ${usage.spend.tokens.toLocaleString("es")} de ${usage.maxTokens.toLocaleString("es")} (PI_ORCHESTRATOR_MAX_TOKENS)`);
+    if (usage.maxTokens !== undefined && usage.spend) lines.push(`Tope de tokens: ${usage.spend.tokens.toLocaleString("es")} de ${usage.maxTokens.toLocaleString("es")} (PI_ORCHESTRATOR_MAX_TOKENS${usage.spend.estimatedTokens ? `; incluye ≥${usage.spend.estimatedTokens.toLocaleString("es")} estimados de Antigravity` : ""})`);
     if (usage.maxCostUsd !== undefined && usage.spend) lines.push(`Tope de coste: $${usage.spend.costUsd.toFixed(2)} de $${usage.maxCostUsd.toFixed(2)} (solo Claude informa dólares; PI_ORCHESTRATOR_MAX_COST_USD)`);
   }
   const reported = tasks.filter((task) => task.usage);
@@ -466,7 +466,9 @@ export function usageReport(usage: { runtimeMs: number; maxRuntimeMs?: number; a
       const own = reported.filter((task) => task.engine === engine);
       if (own.length) lines.push(`  ${engineName(engine)}: ${formatTokens(own.reduce<TaskUsage>((sum, task) => ({ inputTokens: sum.inputTokens + task.usage!.inputTokens, cachedInputTokens: sum.cachedInputTokens + task.usage!.cachedInputTokens, outputTokens: sum.outputTokens + task.usage!.outputTokens }), { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 }))}`);
     }
-  } else if (tasks.length) lines.push("Ningún motor ha reportado tokens todavía (Antigravity no los informa).");
+  } else if (tasks.length && !tasks.some((task) => task.context)) lines.push("Ningún motor ha reportado tokens todavía (Antigravity no los informa).");
+  const estimated = tasks.filter((task) => !task.usage && task.context);
+  if (estimated.length) lines.push(`Estimación de entrada sin contador (${estimated.length} ${estimated.length === 1 ? "tarea" : "tareas"}, sobre todo Antigravity): ≥${estimated.reduce((sum, task) => sum + (task.context!.peak ?? task.context!.used), 0).toLocaleString("es")} tokens, cota inferior por el contexto máximo.`);
   lines.push("No es una factura: son los contadores que informa cada motor.");
   return lines.join("\n");
 }

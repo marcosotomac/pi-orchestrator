@@ -26,7 +26,7 @@ const taskSchema = z.object({
   result: z.string().max(20_000).optional(), partialResult: z.string().max(20_000).optional(), error: z.string().max(8_000).optional(),
   web: z.boolean().optional(),
   label: z.string().max(60).optional(),
-  context: z.object({ used: z.number().int().nonnegative(), size: z.number().int().positive() }).strict().optional(),
+  context: z.object({ used: z.number().int().nonnegative(), size: z.number().int().positive(), peak: z.number().int().nonnegative().optional() }).strict().optional(),
   workspace: z.enum(["worktree", "in-place"]).optional(),
   changes: z.object({ state: z.enum(["pending", "applied", "discarded", "none"]), files: z.number().int().nonnegative(), insertions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(), summary: z.string().max(4_000), repo: z.string().max(8_192).optional(), worktree: z.string().max(8_192).optional(), patchPath: z.string().max(8_192).optional(), base: z.string().max(64).optional(), error: z.string().max(500).optional() }).strict().optional(),
   usage: z.object({ inputTokens: z.number().int().nonnegative(), cachedInputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), reasoningTokens: z.number().int().nonnegative().optional(), costUsd: z.number().nonnegative().optional() }).strict().optional(),

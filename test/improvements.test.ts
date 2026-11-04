@@ -189,7 +189,7 @@ test("spend guards refuse new work once reached, never kill running work, and ar
     assert.throws(() => core.delegate(null, "claude", "more", "m"), /Session token limit reached \(1100 ≥ 1000/);
     release();
     assert.equal((await core.wait(null, long.id)).state, "completed", "running work is never killed by the guard");
-    assert.deepEqual(core.usage().spend, { tokens: 1100, costUsd: 0.6, costEngines: ["claude"] });
+    assert.deepEqual(core.usage().spend, { tokens: 1100, costUsd: 0.6, costEngines: ["claude"], estimatedTokens: 0, estimatedEngines: [] });
   } finally { await core.close(); }
   const priced = new Orchestrator({ cwd: process.cwd(), maxCostUsd: 0.5, adapters: { claude: { capabilities, run } } });
   priced.attachEndpoint("http://127.0.0.1:1/mcp");
