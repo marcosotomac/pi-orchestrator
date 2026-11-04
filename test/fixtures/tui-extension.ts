@@ -13,18 +13,35 @@ async function fakeService(options: ServiceOptions) {
   const adapter: RuntimeAdapter = {
     capabilities,
     async run(context) {
-      const runtime = new RuntimeProcess(process.execPath, [fileURLToPath(new URL("./tui-worker.cjs", import.meta.url)), join(context.task.cwd, ".fixture-lifeline")], context.task.cwd, context.signal);
+      const runtime = new RuntimeProcess(
+        process.execPath,
+        [
+          fileURLToPath(new URL("./tui-worker.cjs", import.meta.url)),
+          join(context.task.cwd, ".fixture-lifeline"),
+        ],
+        context.task.cwd,
+        context.signal,
+      );
       // A private FIFO closes with the harness; workers exit themselves even if Pi crashes.
       try {
         const result = new Promise<string>((resolve, reject) => {
           runtime.onFailure = reject;
-          void runtime.closed.then(() => reject(new Error("fixture runtime closed")));
+          void runtime.closed.then(() =>
+            reject(new Error("fixture runtime closed")),
+          );
           runtime.onMessage = () => {
             context.session(`fixture-${context.task.id}`);
             context.activity("SIMULADO · sin agentes reales");
             if (context.task.depth === 1) {
-              const child = core.delegate(context.task.id, "claude", "Hijo SIMULADO 界", "fixture-child");
-              void core.wait(context.task.id, child.id, 60_000).then(() => resolve("fixture result"), reject);
+              const child = core.delegate(
+                context.task.id,
+                "claude",
+                "Hijo SIMULADO 界",
+                "fixture-child",
+              );
+              void core
+                .wait(context.task.id, child.id, 60_000)
+                .then(() => resolve("fixture result"), reject);
             }
           };
         });
@@ -36,7 +53,10 @@ async function fakeService(options: ServiceOptions) {
       }
     },
   };
-  const service = await createService(options, { codex: adapter, claude: adapter });
+  const service = await createService(options, {
+    codex: adapter,
+    claude: adapter,
+  });
   core = service.core;
   return service;
 }

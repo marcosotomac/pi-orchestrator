@@ -10,5 +10,7 @@ export async function availableCensus(timeoutMs = 10_000) {
     if (rows !== undefined) return rows;
     await delay(40);
   } while (performance.now() < deadline);
-  throw new Error("Process census remained unavailable; cleanup or survival cannot be asserted");
+  throw new Error(
+    "Process census remained unavailable; cleanup or survival cannot be asserted",
+  );
 }

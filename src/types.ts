@@ -1,7 +1,11 @@
 import type { InteractionRequest, InteractionAnswer } from "./interactions.ts";
 
 export type Engine = "codex" | "claude" | "antigravity";
-export interface RecoverySource { runId: string; taskId: string; attemptId: string }
+export interface RecoverySource {
+  runId: string;
+  taskId: string;
+  attemptId: string;
+}
 export type PermissionMode = "restricted" | "yolo";
 export function validatePermissionMode(value: unknown): PermissionMode {
   if (value === undefined || value === "restricted") return "restricted";
@@ -13,13 +17,21 @@ export function validatePermissionMode(value: unknown): PermissionMode {
  * (a worktree for git repos), no network. "off" restores full access and must
  * be an explicit operator choice (PI_ORCHESTRATOR_YOLO_SANDBOX=off).
  */
-export function yoloSandbox(env: NodeJS.ProcessEnv = process.env): "on" | "off" {
+export function yoloSandbox(
+  env: NodeJS.ProcessEnv = process.env,
+): "on" | "off" {
   const value = env.PI_ORCHESTRATOR_YOLO_SANDBOX?.trim();
   if (value === undefined || value === "" || value === "on") return "on";
   if (value === "off") return "off";
   throw new Error("Invalid PI_ORCHESTRATOR_YOLO_SANDBOX (expected on or off)");
 }
-export type TaskState = "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled";
+export type TaskState =
+  | "queued"
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface RuntimeProcessInfo {
   pid: number;
@@ -81,7 +93,9 @@ export interface TaskView {
   changes?: import("./workspace.ts").TaskChanges;
 }
 
-export interface RuntimeControls { steer?: (text: string) => Promise<void> }
+export interface RuntimeControls {
+  steer?: (text: string) => Promise<void>;
+}
 
 export interface RuntimeContext {
   task: TaskView;
@@ -118,7 +132,12 @@ export interface RuntimeAdapter {
 }
 
 export interface EngineCatalog {
-  models: { id: string; name?: string; efforts?: string[]; default?: boolean }[];
+  models: {
+    id: string;
+    name?: string;
+    efforts?: string[];
+    default?: boolean;
+  }[];
   thinking?: string[];
   note?: string;
 }
@@ -147,5 +166,7 @@ export function errorText(error: unknown): string {
   try {
     const text = error instanceof Error ? String(error.message) : String(error);
     return text || "Unknown runtime error";
-  } catch { return "Unknown runtime error"; }
+  } catch {
+    return "Unknown runtime error";
+  }
 }

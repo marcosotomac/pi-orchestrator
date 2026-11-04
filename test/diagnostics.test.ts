@@ -4,8 +4,15 @@ import { diagnoseFailure, runtimeRequestError } from "../src/diagnostics.ts";
 import { RuntimeCleanupError } from "../src/types.ts";
 
 test("RPC error categories preserve safe advice without leaking provider bodies", () => {
-  for (const [code, category] of [[401, "authentication"], [429, "quota"], [-32603, "unknown"]] as const) {
-    const error = runtimeRequestError({ code, message: "PRIVATE_PROVIDER_BODY" });
+  for (const [code, category] of [
+    [401, "authentication"],
+    [429, "quota"],
+    [-32603, "unknown"],
+  ] as const) {
+    const error = runtimeRequestError({
+      code,
+      message: "PRIVATE_PROVIDER_BODY",
+    });
     assert.equal(diagnoseFailure(error).category, category);
     assert.ok(!error.message.includes("PRIVATE_PROVIDER_BODY"));
   }
@@ -16,13 +23,23 @@ test("diagnostics distinguish actionable failures without publishing external te
     [new Error("OAuth authentication failed PRIVATE"), "authentication"],
     [Object.assign(new Error("PRIVATE"), { code: "ECONNRESET" }), "network"],
     [new Error("quota exhausted PRIVATE"), "quota"],
-    [new Error("Selected model is at capacity. Please try a different model. PRIVATE"), "transient"],
+    [
+      new Error(
+        "Selected model is at capacity. Please try a different model. PRIVATE",
+      ),
+      "transient",
+    ],
     [new Error("Malformed JSON PRIVATE"), "protocol"],
     [new RuntimeCleanupError(new Error("PRIVATE")), "cleanup"],
-    [undefined, "unknown"], [new Error("PRIVATE"), "unknown"],
+    [undefined, "unknown"],
+    [new Error("PRIVATE"), "unknown"],
   ] as const) {
     const diagnostic = diagnoseFailure(error);
-    assert.equal(diagnostic.category, category); assert.equal(diagnostic.automaticRetry, category === "network" || category === "transient");
+    assert.equal(diagnostic.category, category);
+    assert.equal(
+      diagnostic.automaticRetry,
+      category === "network" || category === "transient",
+    );
     assert.ok(!JSON.stringify(diagnostic).includes("PRIVATE"));
   }
 });

@@ -1,5 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { errorText, RuntimeCleanupError, type RuntimeProcessInfo } from "../types.ts";
+import {
+  errorText,
+  RuntimeCleanupError,
+  type RuntimeProcessInfo,
+} from "../types.ts";
 import { processCensus, type ProcessCensus } from "../reconciliation.ts";
 
 const maxLineBytes = 1_048_576;
@@ -17,16 +21,31 @@ export class RuntimeProcess {
   private failureHandler: (error: Error) => void = () => {};
   onMessage: (message: Record<string, any>) => void = () => {};
 
-  get failure(): Error | undefined { return this.protocolFailure; }
+  get failure(): Error | undefined {
+    return this.protocolFailure;
+  }
   set onFailure(handler: (error: Error) => void) {
     this.failureHandler = handler;
     // Abort/spawn failures can precede installation of the protocol callbacks.
     if (this.protocolFailure) this.notifyFailure(this.protocolFailure);
   }
 
-  constructor(command: string, args: string[], cwd: string, private signal: AbortSignal, private readonly census: () => ProcessCensus = processCensus, environment?: NodeJS.ProcessEnv) {
+  constructor(
+    command: string,
+    args: string[],
+    cwd: string,
+    private signal: AbortSignal,
+    private readonly census: () => ProcessCensus = processCensus,
+    environment?: NodeJS.ProcessEnv,
+  ) {
     signal.throwIfAborted();
-    this.child = spawn(command, args, { cwd, stdio: "pipe", detached: process.platform !== "win32", shell: false, env: environment });
+    this.child = spawn(command, args, {
+      cwd,
+      stdio: "pipe",
+      detached: process.platform !== "win32",
+      shell: false,
+      env: environment,
+    });
     this.closed = new Promise((resolve) => {
       this.child.once("close", (code, exitSignal) => {
         signal.removeEventListener("abort", this.onAbort);
@@ -35,12 +54,17 @@ export class RuntimeProcess {
     });
     this.child.on("error", (error) => this.fail(error));
     this.child.stdin.on("error", (error) => this.fail(error));
-    this.child.stderr.on("data", (chunk: Buffer) => { this.stderr = (this.stderr + chunk.toString()).slice(-16_000); });
+    this.child.stderr.on("data", (chunk: Buffer) => {
+      this.stderr = (this.stderr + chunk.toString()).slice(-16_000);
+    });
     const decoder = new TextDecoder("utf-8", { fatal: true });
     this.child.stdout.on("data", (chunk: Buffer) => {
       if (this.protocolFailure) return;
-      try { this.consume(decoder.decode(chunk, { stream: true })); }
-      catch (error) { this.fail(error instanceof Error ? error : new Error(errorText(error))); }
+      try {
+        this.consume(decoder.decode(chunk, { stream: true }));
+      } catch (error) {
+        this.fail(error instanceof Error ? error : new Error(errorText(error)));
+      }
     });
     this.child.stdout.on("end", () => {
       if (this.protocolFailure) return;
@@ -50,9 +74,16 @@ export class RuntimeProcess {
         const tail = this.buffer;
         this.buffer = "";
         this.deliver(tail);
-      } catch (error) { this.fail(error instanceof Error ? error : new Error(errorText(error))); }
+      } catch (error) {
+        this.fail(error instanceof Error ? error : new Error(errorText(error)));
+      }
     });
-    this.onAbort = () => this.fail(signal.reason instanceof Error ? signal.reason : new Error("Runtime aborted"));
+    this.onAbort = () =>
+      this.fail(
+        signal.reason instanceof Error
+          ? signal.reason
+          : new Error("Runtime aborted"),
+      );
     signal.addEventListener("abort", this.onAbort, { once: true });
   }
 
@@ -65,21 +96,31 @@ export class RuntimeProcess {
       this.deliver(line);
       if (this.protocolFailure) return;
     }
-    if (Buffer.byteLength(this.buffer) > maxLineBytes) throw new Error("Runtime protocol buffer too large");
+    if (Buffer.byteLength(this.buffer) > maxLineBytes)
+      throw new Error("Runtime protocol buffer too large");
   }
 
   private deliver(line: string): void {
-    if (Buffer.byteLength(line) > maxLineBytes) throw new Error("Runtime protocol line too large");
+    if (Buffer.byteLength(line) > maxLineBytes)
+      throw new Error("Runtime protocol line too large");
     if (!line.trim()) return;
     let message: unknown;
-    try { message = JSON.parse(line); }
-    catch { throw new Error("Invalid runtime JSONL protocol"); } // Never echo the offending record.
-    if (!message || typeof message !== "object" || Array.isArray(message)) throw new Error("Invalid protocol object");
+    try {
+      message = JSON.parse(line);
+    } catch {
+      throw new Error("Invalid runtime JSONL protocol");
+    } // Never echo the offending record.
+    if (!message || typeof message !== "object" || Array.isArray(message))
+      throw new Error("Invalid protocol object");
     this.onMessage(message as Record<string, any>);
   }
 
   private notifyFailure(error: Error): void {
-    try { this.failureHandler(error); } catch { /* A faulty observer cannot prevent process cleanup. */ }
+    try {
+      this.failureHandler(error);
+    } catch {
+      /* A faulty observer cannot prevent process cleanup. */
+    }
   }
 
   private fail(error: Error): void {
@@ -95,12 +136,21 @@ export class RuntimeProcess {
   observe(observer?: (info: RuntimeProcessInfo) => void): void {
     const pid = this.child.pid;
     if (!observer || !pid) return;
-    const info = { pid, ...(process.platform !== "win32" ? { groupId: pid } : {}) };
+    const info = {
+      pid,
+      ...(process.platform !== "win32" ? { groupId: pid } : {}),
+    };
     const notify = (value: RuntimeProcessInfo) => {
-      try { observer(value); } catch { /* Observability must not alter runtime ownership. */ }
+      try {
+        observer(value);
+      } catch {
+        /* Observability must not alter runtime ownership. */
+      }
     };
     notify({ ...info });
-    void this.closed.then(({ code, signal }) => notify({ ...info, code, signal, exitedAt: new Date().toISOString() }));
+    void this.closed.then(({ code, signal }) =>
+      notify({ ...info, code, signal, exitedAt: new Date().toISOString() }),
+    );
   }
 
   send(message: unknown): void {
@@ -108,18 +158,21 @@ export class RuntimeProcess {
     if (this.child.stdin.destroyed) throw new Error("Runtime stdin is closed");
     const text = JSON.stringify(message);
     if (text === undefined) throw new Error("Invalid runtime request");
-    if (Buffer.byteLength(text) > maxLineBytes) throw new Error("Runtime request too large");
+    if (Buffer.byteLength(text) > maxLineBytes)
+      throw new Error("Runtime request too large");
     this.child.stdin.write(text + "\n");
   }
 
   private kill(signal: NodeJS.Signals): void {
     if (this.groupRetired) return;
     try {
-      if (process.platform !== "win32" && this.child.pid) process.kill(-this.child.pid, signal);
+      if (process.platform !== "win32" && this.child.pid)
+        process.kill(-this.child.pid, signal);
       else this.child.kill(signal);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      const exited = this.child.exitCode !== null || this.child.signalCode !== null;
+      const exited =
+        this.child.exitCode !== null || this.child.signalCode !== null;
       if (code === "ESRCH") {
         if (exited) this.groupRetired = true;
         return;
@@ -130,8 +183,16 @@ export class RuntimeProcess {
       if (code === "EPERM" && process.platform !== "win32" && this.child.pid) {
         const rows = this.census();
         const leader = rows?.find((row) => row.pid === this.child.pid);
-        if (rows && (exited || (leader?.groupId === this.child.pid && leader.state.startsWith("Z"))) &&
-            !rows.some((row) => row.groupId === this.child.pid && !row.state.startsWith("Z"))) {
+        if (
+          rows &&
+          (exited ||
+            (leader?.groupId === this.child.pid &&
+              leader.state.startsWith("Z"))) &&
+          !rows.some(
+            (row) =>
+              row.groupId === this.child.pid && !row.state.startsWith("Z"),
+          )
+        ) {
           this.groupRetired = true; // No later signals to a numerically reused group.
           return;
         }
@@ -141,7 +202,9 @@ export class RuntimeProcess {
   }
 
   stop(): Promise<void> {
-    return this.stopped ??= this.stopOnce().catch((error: unknown) => { throw new RuntimeCleanupError(error); });
+    return (this.stopped ??= this.stopOnce().catch((error: unknown) => {
+      throw new RuntimeCleanupError(error);
+    }));
   }
 
   private async stopOnce(): Promise<void> {
@@ -149,8 +212,15 @@ export class RuntimeProcess {
     this.kill("SIGTERM");
     let timer: NodeJS.Timeout | undefined;
     try {
-      await Promise.race([this.closed, new Promise<void>((resolve) => { timer = setTimeout(resolve, 1_000); })]);
-    } finally { clearTimeout(timer); }
+      await Promise.race([
+        this.closed,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, 1_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
     // Also kill remaining grandchildren when the group leader has already exited.
     this.kill("SIGKILL");
     await this.closed;

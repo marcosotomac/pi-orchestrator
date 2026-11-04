@@ -1,0 +1,7 @@
+node_modules/
+artifacts/
+.state/
+.runtimes/
+# Local, untracked benchmark: preserve the operator's work.
+scripts/compare-subagents-live.ts
+**/*.py

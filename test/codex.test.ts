@@ -7,20 +7,39 @@ import { CodexAdapter } from "../src/adapters/codex.ts";
 import type { RuntimeProcessInfo, TaskView } from "../src/types.ts";
 
 for (const [mode, expected] of [
-  ["yolo", null], ["completion-before-ack", null], ["item-fallback", null], ["thinking", null], ["unsupported-thinking", /reasoning effort is unavailable/],
-  ["wrong-thread", /requested thread/], ["wrong-turn", /requested turn/],
-  ["missing-thread", /no thread id/], ["missing-turn", /no turn id/],
-  ["invalid-rpc", /RPC response/], ["premature-completion", /requested thread/],
-  ["duplicate-completion", /duplicate turn completion/], ["trailing-garbage", /JSONL/],
-  ["failed-turn", /fixture native failure/], ["invalid-text", /invalid result text/],
-  ["mcp-leak", /MCP isolation could not be verified; inherited servers active: user-shell/],
+  ["yolo", null],
+  ["completion-before-ack", null],
+  ["item-fallback", null],
+  ["thinking", null],
+  ["unsupported-thinking", /reasoning effort is unavailable/],
+  ["wrong-thread", /requested thread/],
+  ["wrong-turn", /requested turn/],
+  ["missing-thread", /no thread id/],
+  ["missing-turn", /no turn id/],
+  ["invalid-rpc", /RPC response/],
+  ["premature-completion", /requested thread/],
+  ["duplicate-completion", /duplicate turn completion/],
+  ["trailing-garbage", /JSONL/],
+  ["failed-turn", /fixture native failure/],
+  ["invalid-text", /invalid result text/],
+  [
+    "mcp-leak",
+    /MCP isolation could not be verified; inherited servers active: user-shell/,
+  ],
   ["invalid-mcp-listing", /invalid MCP server listing/],
   ["invalid-config", /invalid configuration/],
 ] as const) {
-  test(`Codex protocol correlation and cleanup: ${mode}`, { skip: process.platform === "win32" }, async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-orchestrator-codex-protocol-"));
-    const executable = join(cwd, "fixture.cjs");
-    await writeFile(executable, `#!/usr/bin/env node
+  test(
+    `Codex protocol correlation and cleanup: ${mode}`,
+    { skip: process.platform === "win32" },
+    async () => {
+      const cwd = await mkdtemp(
+        join(tmpdir(), "pi-orchestrator-codex-protocol-"),
+      );
+      const executable = join(cwd, "fixture.cjs");
+      await writeFile(
+        executable,
+        `#!/usr/bin/env node
 const mode=${JSON.stringify(mode)};
 const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
 const done={method:'turn/completed',params:{threadId:'fixture-thread',turn:{id:'fixture-turn',status:'completed',items:[{type:'agentMessage',text:'fixture result'}]}}};
@@ -68,32 +87,80 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
    process.stdout.write(rows.map(JSON.stringify).join('\\n')+'\\n'+(mode==='trailing-garbage'?'private-fixture-not-json\\n':''));
  }
 });
-`, { mode: 0o700 });
-    const observations: RuntimeProcessInfo[] = [];
-    const partials: string[] = [];
-    const controller = new AbortController();
-    const watchdog = setTimeout(() => controller.abort(new Error("Fixture protocol deadline")), 15_000);
-    const task: TaskView = { id: "task", title: "fixture", attemptId: "attempt", parentId: null, engine: "codex", depth: 1, state: "running", cwd, createdAt: new Date().toISOString() };
-    try {
-      if (mode === "yolo") task.permissionMode = "yolo";
-      if (mode === "thinking" || mode === "unsupported-thinking") task.selection = { model: "chosen", thinking: mode === "thinking" ? "high" : "invented" };
-      const running = new CodexAdapter(executable).run({ task, prompt: "fixture", signal: controller.signal,
-        mcp: { url: "http://127.0.0.1:12345/mcp", token: "fixture-private-token" }, session() {}, activity() {},
-        partial: (text) => { partials.push(text); },
-        process: (info) => { observations.push(info); },
-      });
-      if (expected) await assert.rejects(running, expected);
-      else assert.equal(await running, "fixture result");
-      if (mode === "item-fallback") assert.deepEqual(partials, ["fixture result"], "completed agent messages are reported as partial text");
-      assert.ok(observations.at(-1)?.exitedAt, "Protocol failure or success must observe exit before settling");
-    } finally { clearTimeout(watchdog); await rm(cwd, { recursive: true, force: true }); }
-  });
+`,
+        { mode: 0o700 },
+      );
+      const observations: RuntimeProcessInfo[] = [];
+      const partials: string[] = [];
+      const controller = new AbortController();
+      const watchdog = setTimeout(
+        () => controller.abort(new Error("Fixture protocol deadline")),
+        15_000,
+      );
+      const task: TaskView = {
+        id: "task",
+        title: "fixture",
+        attemptId: "attempt",
+        parentId: null,
+        engine: "codex",
+        depth: 1,
+        state: "running",
+        cwd,
+        createdAt: new Date().toISOString(),
+      };
+      try {
+        if (mode === "yolo") task.permissionMode = "yolo";
+        if (mode === "thinking" || mode === "unsupported-thinking")
+          task.selection = {
+            model: "chosen",
+            thinking: mode === "thinking" ? "high" : "invented",
+          };
+        const running = new CodexAdapter(executable).run({
+          task,
+          prompt: "fixture",
+          signal: controller.signal,
+          mcp: {
+            url: "http://127.0.0.1:12345/mcp",
+            token: "fixture-private-token",
+          },
+          session() {},
+          activity() {},
+          partial: (text) => {
+            partials.push(text);
+          },
+          process: (info) => {
+            observations.push(info);
+          },
+        });
+        if (expected) await assert.rejects(running, expected);
+        else assert.equal(await running, "fixture result");
+        if (mode === "item-fallback")
+          assert.deepEqual(
+            partials,
+            ["fixture result"],
+            "completed agent messages are reported as partial text",
+          );
+        assert.ok(
+          observations.at(-1)?.exitedAt,
+          "Protocol failure or success must observe exit before settling",
+        );
+      } finally {
+        clearTimeout(watchdog);
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+  );
 }
 
-test("Codex handshake disables inherited hooks/notify at startup and thread scope; string-id native questions fail closed", { skip: process.platform === "win32" }, async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "pi-orchestrator-codex-fixture-"));
-  const executable = join(cwd, "codex-fixture.cjs");
-  await writeFile(executable, `#!/usr/bin/env node
+test(
+  "Codex handshake disables inherited hooks/notify at startup and thread scope; string-id native questions fail closed",
+  { skip: process.platform === "win32" },
+  async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-orchestrator-codex-fixture-"));
+    const executable = join(cwd, "codex-fixture.cjs");
+    await writeFile(
+      executable,
+      `#!/usr/bin/env node
 const assert = require('node:assert/strict');
 const readline = require('node:readline');
 const send = (message) => console.log(JSON.stringify(message));
@@ -142,27 +209,79 @@ readline.createInterface({input:process.stdin}).on('line', (line) => {
     send({method:'turn/completed',params:{threadId:'native-fixture-session',turn:{id:'fixture-turn',status:'completed',items:[{type:'agentMessage',text:'fixture passed'}]}}});
   }
 });
-`, { mode: 0o700 });
-  const task: TaskView = { id: "task", title: "fixture", attemptId: "attempt", parentId: null, engine: "codex", depth: 1, state: "running", cwd, createdAt: new Date().toISOString() };
-  const sessions: string[] = [], observations: RuntimeProcessInfo[] = [], usages: unknown[] = [];
-  const controller = new AbortController();
-  const watchdog = setTimeout(() => controller.abort(new Error("Fixture handshake did not settle")), 5_000);
-  try {
-    const result = await new CodexAdapter(executable).run({
-      task, prompt: "fixture", signal: controller.signal, mcp: { url: "http://127.0.0.1:12345/mcp", token: "fixture-private-token" },
-      session: (id) => { sessions.push(id); }, process: (info) => { observations.push(info); }, activity() {}, usage: (value) => { usages.push(value); },
-    });
-    assert.equal(result, "fixture passed");
-    assert.deepEqual(usages, [{ inputTokens: 4200, cachedInputTokens: 3000, outputTokens: 150, reasoningTokens: 60 }], "only this thread's cumulative usage is reported");
-    assert.deepEqual(sessions, ["native-fixture-session"]);
-    assert.ok(observations.at(-1)?.exitedAt);
-  } finally { clearTimeout(watchdog); await rm(cwd, { recursive: true, force: true }); }
-});
+`,
+      { mode: 0o700 },
+    );
+    const task: TaskView = {
+      id: "task",
+      title: "fixture",
+      attemptId: "attempt",
+      parentId: null,
+      engine: "codex",
+      depth: 1,
+      state: "running",
+      cwd,
+      createdAt: new Date().toISOString(),
+    };
+    const sessions: string[] = [],
+      observations: RuntimeProcessInfo[] = [],
+      usages: unknown[] = [];
+    const controller = new AbortController();
+    const watchdog = setTimeout(
+      () => controller.abort(new Error("Fixture handshake did not settle")),
+      5_000,
+    );
+    try {
+      const result = await new CodexAdapter(executable).run({
+        task,
+        prompt: "fixture",
+        signal: controller.signal,
+        mcp: {
+          url: "http://127.0.0.1:12345/mcp",
+          token: "fixture-private-token",
+        },
+        session: (id) => {
+          sessions.push(id);
+        },
+        process: (info) => {
+          observations.push(info);
+        },
+        activity() {},
+        usage: (value) => {
+          usages.push(value);
+        },
+      });
+      assert.equal(result, "fixture passed");
+      assert.deepEqual(
+        usages,
+        [
+          {
+            inputTokens: 4200,
+            cachedInputTokens: 3000,
+            outputTokens: 150,
+            reasoningTokens: 60,
+          },
+        ],
+        "only this thread's cumulative usage is reported",
+      );
+      assert.deepEqual(sessions, ["native-fixture-session"]);
+      assert.ok(observations.at(-1)?.exitedAt);
+    } finally {
+      clearTimeout(watchdog);
+      await rm(cwd, { recursive: true, force: true });
+    }
+  },
+);
 
-test("Codex continues a persisted thread with thread/resume, the same isolation and a fresh bridge credential", { skip: process.platform === "win32" }, async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "pi-orchestrator-codex-resume-"));
-  const executable = join(cwd, "fixture.cjs");
-  await writeFile(executable, `#!/usr/bin/env node
+test(
+  "Codex continues a persisted thread with thread/resume, the same isolation and a fresh bridge credential",
+  { skip: process.platform === "win32" },
+  async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-orchestrator-codex-resume-"));
+    const executable = join(cwd, "fixture.cjs");
+    await writeFile(
+      executable,
+      `#!/usr/bin/env node
 const assert=require('node:assert/strict'); const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const q=JSON.parse(line);
@@ -178,14 +297,43 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
  if(q.method==='mcpServerStatus/list') send({id:q.id,result:{data:[{name:'user-shell',runtimeStatus:'disabled'}]}});
  if(q.method==='turn/start') { assert.equal(q.params.threadId,'persisted-thread'); send({id:q.id,result:{turn:{id:'t2'}}}); send({method:'turn/completed',params:{threadId:'persisted-thread',turn:{id:'t2',status:'completed',items:[{type:'agentMessage',text:'continued'}]}}}); }
 });
-`, { mode: 0o700 });
-  const task: TaskView = { id: "task", title: "follow-up", attemptId: "attempt-2", parentId: null, engine: "codex", depth: 1, state: "running", cwd, createdAt: new Date().toISOString() };
-  const sessions: string[] = [];
-  const controller = new AbortController();
-  const watchdog = setTimeout(() => controller.abort(new Error("Fixture resume deadline")), 10_000);
-  try {
-    const result = await new CodexAdapter(executable).run({ task, prompt: "now explain", resumeSessionId: "persisted-thread", signal: controller.signal,
-      mcp: { url: "http://127.0.0.1:12345/mcp", token: "fresh-token" }, session: (id) => { sessions.push(id); }, activity() {} });
-    assert.equal(result, "continued"); assert.deepEqual(sessions, ["persisted-thread"]);
-  } finally { clearTimeout(watchdog); await rm(cwd, { recursive: true, force: true }); }
-});
+`,
+      { mode: 0o700 },
+    );
+    const task: TaskView = {
+      id: "task",
+      title: "follow-up",
+      attemptId: "attempt-2",
+      parentId: null,
+      engine: "codex",
+      depth: 1,
+      state: "running",
+      cwd,
+      createdAt: new Date().toISOString(),
+    };
+    const sessions: string[] = [];
+    const controller = new AbortController();
+    const watchdog = setTimeout(
+      () => controller.abort(new Error("Fixture resume deadline")),
+      10_000,
+    );
+    try {
+      const result = await new CodexAdapter(executable).run({
+        task,
+        prompt: "now explain",
+        resumeSessionId: "persisted-thread",
+        signal: controller.signal,
+        mcp: { url: "http://127.0.0.1:12345/mcp", token: "fresh-token" },
+        session: (id) => {
+          sessions.push(id);
+        },
+        activity() {},
+      });
+      assert.equal(result, "continued");
+      assert.deepEqual(sessions, ["persisted-thread"]);
+    } finally {
+      clearTimeout(watchdog);
+      await rm(cwd, { recursive: true, force: true });
+    }
+  },
+);

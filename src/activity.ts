@@ -17,6 +17,10 @@ export function commandTarget(value: unknown): string | undefined {
 }
 
 /** "engine: action · target" (target optional); presentation translates the action. */
-export function activityText(engine: string, action: string, target?: string): string {
+export function activityText(
+  engine: string,
+  action: string,
+  target?: string,
+): string {
   return target ? `${engine}: ${action} · ${target}` : `${engine}: ${action}`;
 }
