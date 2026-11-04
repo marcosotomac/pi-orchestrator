@@ -1,8 +1,4 @@
-import {
-  stripTerminalSequences,
-  truncateToWidth,
-  visibleWidth,
-} from "@earendil-works/pi-tui";
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { defaultEffort } from "./adapters/codex.ts";
 import {
   isTerminal,
