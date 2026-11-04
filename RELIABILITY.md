@@ -8,7 +8,9 @@ Tres ejecuciones paralelas consecutivas pasaron 168 pruebas: `artifacts/parallel
 
 ## Diagnósticos
 
-Las tareas fallidas exponen `diagnostic.category`, `recovery` y `automaticRetry:false`. Categorías: authentication/network/quota/protocol/cleanup/unknown. Son recomendaciones, no autoridad ni garantía de causa: errores externos ambiguos permanecen unknown. Antigravity clasifica sus rechazos RPC sin publicar el cuerpo del proveedor; mensajes y códigos disponibles pueden orientar la categoría, no provocar recuperación automática. Nunca cambia cuentas, importa credenciales, relaja validaciones ni repite trabajo por sí solo.
+Las tareas fallidas exponen `diagnostic.category`, `recovery` y `automaticRetry`. Categorías: authentication/network/quota/transient/protocol/cleanup/unknown. Son recomendaciones, no autoridad ni garantía de causa: errores externos ambiguos permanecen unknown. Antigravity clasifica sus rechazos RPC sin publicar el cuerpo del proveedor. Nunca cambia cuentas, importa credenciales ni relaja validaciones.
+
+**Reintento automático (único).** `automaticRetry` es `true` solo para `transient` y `network`, y aun así el núcleo (`retryable()` en `src/orchestrator.ts`) reintenta **una sola vez**, tras `RETRY_DELAY_MS`, y solo si se cumplen todas estas condiciones: la tarea no es YOLO ni una continuación nativa; no lanzó hijos; su proceso terminó; no fue cancelada ni el coordinador se está cerrando; y **ninguna operación fue aprobada por una persona** durante el intento (en Antigravity restricted, un comando aprobado puede tener efectos). El consumo de ambos intentos se suma. Las demás categorías nunca se reintentan solas; la recuperación es explícita (`/orch` → R, o `restart`). No hay garantía de ejecución exactamente una vez.
 
 ## Prueba humana de permisos Antigravity
 
