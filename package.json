@@ -11,7 +11,7 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "tsx --test test/*.test.ts",
+    "test": "node --import tsx --test test/*.test.ts",
     "smoke:live": "tsx scripts/live-smoke.ts",
     "smoke:cancel": "tsx scripts/live-cancel.ts",
     "smoke:cases": "tsx scripts/live-cases.ts",
