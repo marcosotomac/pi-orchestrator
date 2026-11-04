@@ -1,7 +1,7 @@
 import { RuntimeCleanupError } from "./types.ts";
 
 export type FailureCategory = "authentication" | "network" | "quota" | "transient" | "protocol" | "cleanup" | "unknown";
-/** automaticRetry: whether the core may retry once (transient/network, read-only, no children). */
+/** automaticRetry: the category allows one core retry; the core also requires a restricted task with no children, no live process and no human-approved operation. */
 export interface FailureDiagnostic { category: FailureCategory; recovery: string; automaticRetry: boolean }
 
 export class RuntimeRequestError extends Error {
@@ -43,7 +43,7 @@ export function diagnoseFailure(error: unknown): FailureDiagnostic {
     authentication: "Authenticate separately with the selected runtime; do not import another runtime's credentials.",
     network: "Check connectivity. Inspect task and descendants before explicitly starting new work; duplicate execution is possible.",
     quota: "Check the runtime account quota or wait for its limit to reset; do not retry automatically or switch accounts silently.",
-    transient: "The provider was temporarily unavailable. A read-only task without children is retried once automatically; otherwise retry explicitly later.",
+    transient: "The provider was temporarily unavailable. A restricted task without children or human-approved operations is retried once automatically; otherwise retry explicitly later.",
     protocol: "Stop using this runtime version until compatibility is checked. Preserve private evidence; do not relax validation.",
     cleanup: "Cleanup is unconfirmed. Do not acknowledge cancellation or reuse this session; inspect owned live controls manually.",
     unknown: "Inspect private evidence and current task state before any explicit retry; no automatic recovery is safe.",

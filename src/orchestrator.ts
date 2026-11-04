@@ -58,6 +58,8 @@ interface Entry {
   rawUsage?: TaskUsage;
   /** Thread total already attributed to the source task: subtracted for a continuation. */
   usageBaseline?: TaskUsage;
+  /** A human granted a runtime permission: the attempt may have had side effects, so it is never repeated automatically. */
+  humanApproved?: boolean;
 }
 
 export interface OrchestratorOptions {
@@ -385,7 +387,10 @@ export class Orchestrator {
             ...request, title: this.redact(request.title, token), detail: this.redact(request.detail, token),
             options: request.options.map((option) => ({ ...option, label: this.redact(option.label, token) })),
           }, entry.controller.signal);
-          return this.identities.has(entry.tokenHash) && !entry.controller.signal.aborted ? answer : undefined;
+          const granted = this.identities.has(entry.tokenHash) && !entry.controller.signal.aborted ? answer : undefined;
+          // Restricted is not side-effect free when a person approves an operation (e.g. an Antigravity command).
+          if (granted && request.kind === "permission") entry.humanApproved = true;
+          return granted;
         },
         session: (id) => {
           if (entry.controller.signal.aborted || isTerminal(entry.view)) return;
@@ -529,7 +534,7 @@ export class Orchestrator {
   /** One automatic retry is safe only when repeating cannot duplicate side effects. */
   private retryable(entry: Entry, error: unknown): boolean {
     if (entry.controller.signal.aborted || this.closing || error instanceof RuntimeCleanupError) return false;
-    if (entry.view.permissionMode === "yolo" || entry.resumeSessionId) return false;
+    if (entry.view.permissionMode === "yolo" || entry.resumeSessionId || entry.humanApproved) return false;
     if ((this.children.get(entry.view.id)?.size ?? 0) > 0) return false; // children would be duplicated
     if (entry.view.runtimeProcess && !entry.view.runtimeProcess.exitedAt) return false;
     return diagnoseFailure(error).automaticRetry;
