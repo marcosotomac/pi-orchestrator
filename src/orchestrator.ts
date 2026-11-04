@@ -1,3 +1,4 @@
+import { transitionTask } from "./task-state.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1000,24 +1001,24 @@ export class Orchestrator {
         ) ||
         children.some((child) => child.cleanupFailed);
       if (entry.cleanupFailed) {
-        entry.view.state = "failed";
+        transitionTask(entry.view, "failed");
         entry.view.error =
           "Runtime cleanup could not be confirmed; no cancellation or process-group cleanup was acknowledged";
         entry.view.diagnostic = diagnoseFailure(
           new RuntimeCleanupError(undefined),
         );
       } else if (entry.controller.signal.aborted) {
-        entry.view.state = "cancelled";
+        transitionTask(entry.view, "cancelled");
         entry.view.error = errorText(entry.controller.signal.reason);
       } else if (didFail) {
-        entry.view.state = "failed";
+        transitionTask(entry.view, "failed");
         entry.view.error = this.redact(errorText(failure), token).slice(
           0,
           8_000,
         );
         entry.view.diagnostic = diagnoseFailure(failure);
       } else {
-        entry.view.state = "completed";
+        transitionTask(entry.view, "completed");
         entry.view.result = output!;
       }
       if (entry.view.state !== "completed" && entry.partial?.trim()) {
@@ -1040,7 +1041,7 @@ export class Orchestrator {
       this.budget.setActive(this.activeCount);
       if (!this.checkpoint() && entry.view.state === "completed") {
         // Native success without a committed final checkpoint is not durable task success.
-        entry.view.state = "failed";
+        transitionTask(entry.view, "failed", "checkpoint-failed");
         delete entry.view.result;
         entry.view.error = this.persistenceFailure!.message;
       }
@@ -1337,7 +1338,7 @@ export class Orchestrator {
       const entry = this.entry(id);
       if (isTerminal(entry.view)) continue;
       entry.started = true;
-      entry.view.state = "running";
+      transitionTask(entry.view, "running");
       this.activeCount++;
       this.activeRoots++;
       // Dispatch is a second durable barrier, before granting credentials or invoking the runtime.
@@ -1373,7 +1374,7 @@ export class Orchestrator {
         )
           this.sessionLeases.delete(entry.resumeSessionId);
         entry.controller.abort(new Error(reason));
-        entry.view.state = "cancelled";
+        transitionTask(entry.view, "cancelled");
         entry.view.error = reason;
         entry.view.endedAt = new Date().toISOString();
         this.emit("settled", entry);
@@ -1381,7 +1382,7 @@ export class Orchestrator {
         continue;
       }
       if (!entry.controller.signal.aborted) {
-        entry.view.state = "cancelling";
+        transitionTask(entry.view, "cancelling");
         entry.controller.abort(new Error(reason));
         this.emit("cancelling", entry);
       }
