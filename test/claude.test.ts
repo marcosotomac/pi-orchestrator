@@ -31,7 +31,12 @@ assert.ok(args.includes('--strict-mcp-config'));
 assert.ok(!args.includes('--restricted'),'--restricted would remove Bash; the sandbox bounds it instead');
 const sandbox=JSON.parse(option('--settings')).sandbox;
 assert.equal(sandbox.enabled,true);assert.deepEqual(sandbox.network,{allowedDomains:[],strictAllowlist:true});assert.equal(sandbox.failIfUnavailable,true);assert.equal(sandbox.allowUnsandboxedCommands,false);
-if(mode==='yolo') assert.equal(sandbox.filesystem,undefined,'YOLO may write inside its task directory');
+const settings=JSON.parse(option('--settings')), home=require('node:os').homedir();
+for(const secret of [path.join(home,'.ssh'),path.join(home,'.pi/agent/auth.json')]) {
+  assert.ok(sandbox.filesystem.denyRead.includes(secret),'Bash cannot read credential stores');
+  assert.ok(settings.permissions.deny.includes('Read(/'+secret+')')&&settings.permissions.deny.includes('Read(/'+secret+'/**)'),'Read/Grep/Glob cannot read credential stores');
+}
+if(mode==='yolo') assert.equal(sandbox.filesystem.denyWrite,undefined,'YOLO may write inside its task directory');
 else assert.deepEqual(sandbox.filesystem.denyWrite.map((p)=>fs.realpathSync(p)),[process.cwd()],'restricted Bash cannot write the task directory');
 assert.equal(args.includes('--dangerously-skip-permissions'),mode==='yolo');
 assert.equal(option('--tools'),mode==='yolo'?'Read,Glob,Grep,Bash,Write,Edit':'Read,Glob,Grep,Bash');

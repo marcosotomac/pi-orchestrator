@@ -1,10 +1,29 @@
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { managedAntigravityDirectory } from "../antigravity-profile.ts";
 import { capabilities, validatePermissionMode, yoloSandbox, RuntimeCleanupError, type EngineCatalog, type RuntimeAdapter, type RuntimeContext } from "../types.ts";
 import { RuntimeProcess } from "./process.ts";
 import { WORKER_CONTRACT } from "../worker-contract.ts";
 import { activityText, commandTarget, pathTarget } from "../activity.ts";
+
+/**
+ * Credential stores a worker never needs to read. Restricted workers cannot write, but
+ * they can read, and whatever they read goes to the model provider. Denied for the
+ * Read/Grep/Glob tools (permission rules) and for Bash (sandbox denyRead).
+ */
+export function credentialPaths(env: NodeJS.ProcessEnv = process.env, home = homedir()): string[] {
+  const inHome = [".ssh", ".aws", ".gnupg", ".kube", ".azure", ".config/gcloud", ".config/gh", ".docker/config.json", ".netrc", ".npmrc", ".pypirc",
+    ".git-credentials", ".pi/agent/auth.json", ".codex/auth.json", ".claude/.credentials.json", "Library/Keychains"].map((path) => join(home, path));
+  // The orchestrator's own Antigravity OAuth profile.
+  const profiles = [join(managedAntigravityDirectory, "profile"), ...(env.PI_ORCHESTRATOR_ANTIGRAVITY_PROFILE ? [resolve(env.PI_ORCHESTRATOR_ANTIGRAVITY_PROFILE)] : [])];
+  return [...new Set([...inHome, ...profiles].map((path) => path.replace(/\/+$/, "")))];
+}
+
+/** Claude permission rules: `//` marks an absolute path; a directory also denies its contents. */
+export function credentialReadRules(paths: string[]): string[] {
+  return paths.flatMap((path) => [`Read(/${path})`, `Read(/${path}/**)`]);
+}
 
 /** Bounded integer from the environment; invalid values fail closed. */
 export function claudeLimit(name: string, fallback: number, min: number, max: number, env: NodeJS.ProcessEnv = process.env): number {
@@ -47,9 +66,10 @@ export class ClaudeAdapter implements RuntimeAdapter {
     // WebSearch/WebFetch only when the operator granted internet access for this task;
     // Bash stays offline in the sandbox either way.
     const tools = `${yolo ? "Read,Glob,Grep,Bash,Write,Edit" : "Read,Glob,Grep,Bash"}${context.task.web ? ",WebSearch,WebFetch" : ""}`;
+    const secrets = credentialPaths();
     const sandbox = sandboxed ? { sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
       // No network from Bash, matching Codex's sandbox (measured: YOLO otherwise auto-approved outbound requests).
-      network: { allowedDomains: [], strictAllowlist: true }, ...(!yolo ? { filesystem: { denyWrite: [context.task.cwd] } } : {}) } } : {};
+      network: { allowedDomains: [], strictAllowlist: true }, filesystem: { denyRead: secrets, ...(!yolo ? { denyWrite: [context.task.cwd] } : {}) } } } : {};
     const directory = await mkdtemp(join(tmpdir(), "pi-orchestrator-claude-"));
     let runtime: RuntimeProcess | undefined;
     try {
@@ -67,7 +87,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
         "--tools", tools, "--allowedTools", `${tools},mcp__pi_orchestrator__*`,
         "--permission-mode", yolo ? "bypassPermissions" : "dontAsk", "--permission-prompts", "none",
         "--setting-sources", "", "--strict-mcp-config", "--mcp-config", configPath,
-        "--settings", JSON.stringify({ disableAllHooks: true, enabledPlugins: {}, autoMemoryEnabled: false, ...sandbox }),
+        "--settings", JSON.stringify({ disableAllHooks: true, enabledPlugins: {}, autoMemoryEnabled: false, permissions: { deny: credentialReadRules(secrets) }, ...sandbox }),
         "--disable-slash-commands", "--no-chrome", "--max-turns", String(claudeLimit("PI_ORCHESTRATOR_CLAUDE_MAX_TURNS", 40, 1, 500)), "--max-budget-usd", claudeBudget(),
         "--append-system-prompt", `${yolo ? "The operator authorized unattended tool execution for this task only. Follow the task scope; do not request tool approvals." : "You are a read-only worker supervised by Pi. Do not modify files. Bash runs in a read-only sandbox: use it to verify (build, tests, inspection), not to write."} Delegate only when explicitly required by your assigned task, using pi_orchestrator MCP tools, never native subagents. Wait for delegated results. Do not grant yourself or children additional permissions, ask the human directly, or expose credentials. Report child failures honestly. ${WORKER_CONTRACT}`,
         ...(context.task.selection?.model ? ["--model", context.task.selection.model] : []),
