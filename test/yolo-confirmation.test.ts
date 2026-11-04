@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { yoloConfirmation } from "../src/presentation.ts";
@@ -15,8 +15,11 @@ test("isolation preview tells apart a repo with commits, one without, no repo an
   const empty = realpathSync(mkdtempSync(join(tmpdir(), "orch-iso-empty-")));
   git(empty, "init", "-q");
   assert.deepEqual(await isolationPreview(empty), { isolated: false, reason: "no-commit" });
-  writeFileSync(join(empty, "a.txt"), "a"); git(empty, "add", "."); git(empty, "commit", "-qm", "init");
-  assert.deepEqual(await isolationPreview(empty), { isolated: true });
+  writeFileSync(join(empty, "a.txt"), "a"); writeFileSync(join(empty, ".gitignore"), ".env\nnode_modules/\n"); git(empty, "add", "."); git(empty, "commit", "-qm", "init");
+  assert.deepEqual(await isolationPreview(empty), { isolated: true, untracked: 0, ignored: 0, examples: [] });
+  writeFileSync(join(empty, "new.ts"), "x"); writeFileSync(join(empty, ".env"), "SECRET=1");
+  mkdirSync(join(empty, "node_modules", "dep"), { recursive: true }); writeFileSync(join(empty, "node_modules", "dep", "i.js"), "");
+  assert.deepEqual(await isolationPreview(empty), { isolated: true, untracked: 1, ignored: 2, examples: [".env", "node_modules/", "new.ts"] }, "an ignored tree counts once");
   assert.deepEqual(await isolationPreview(empty, false), { isolated: false, reason: "disabled" });
 });
 
@@ -32,4 +35,7 @@ test("YOLO confirmation states what each engine really enforces", () => {
   assert.match(yoloConfirmation("codex", { isolated: false, reason: "no-commit" }, "on"), /⚠ SIN AISLAMIENTO: el repositorio no tiene commits/);
   assert.match(yoloConfirmation("codex", { isolated: false, reason: "disabled" }, "on"), /PI_ORCHESTRATOR_ISOLATE_WRITES=0/);
   for (const engine of ["codex", "claude", "antigravity"] as const) assert.doesNotMatch(yoloConfirmation(engine, isolated, "on"), /aislado con sandbox/);
+  assert.doesNotMatch(yoloConfirmation("codex", { isolated: true, untracked: 0, ignored: 0, examples: [] }, "on"), /No se copian/);
+  assert.match(yoloConfirmation("codex", { isolated: true, untracked: 1, ignored: 2, examples: [".env", "node_modules/", "new.ts"] }, "on"),
+    /⚠ No se copian al worktree: 1 archivo sin versionar y 2 rutas ignoradas \(p\. ej\. \.env, node_modules\/, new\.ts\)\. Si la tarea los necesita/);
 });

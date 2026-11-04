@@ -1,6 +1,7 @@
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { defaultEffort } from "./adapters/codex.ts";
 import { isTerminal, type Engine, type TaskUsage, type TaskView } from "./types.ts";
+import type { IsolationPreview } from "./workspace.ts";
 
 /** Provider output is untrusted terminal data: no OSC links, escapes, or control bytes. */
 export function safeText(text: string): string {
@@ -421,11 +422,16 @@ const ISOLATION_TEXT: Record<"not-git" | "no-commit" | "disabled", string> = {
  * a worktree only separates checkouts, and only Codex/Claude add an OS sandbox.
  * Antigravity's adapter has none (measured: no sandbox flag reaches its runtime).
  */
-export function yoloConfirmation(engine: Engine, isolation: { isolated: true } | { isolated: false; reason: "not-git" | "no-commit" | "disabled" }, sandbox: "on" | "off"): string {
+export function yoloConfirmation(engine: Engine, isolation: IsolationPreview, sandbox: "on" | "off"): string {
   const lines = ["Ejecutará comandos y modificará archivos SIN pedir aprobación."];
   lines.push(isolation.isolated
     ? "Trabaja en un worktree aislado: tu checkout no se toca y tú revisas el diff antes de aplicarlo. Un worktree separa archivos del repositorio; no es un sandbox."
     : ISOLATION_TEXT[isolation.reason]);
+  const missing = isolation.isolated ? (isolation.untracked ?? 0) + (isolation.ignored ?? 0) : 0;
+  if (isolation.isolated && missing) {
+    const parts = [isolation.untracked ? `${isolation.untracked} ${isolation.untracked === 1 ? "archivo sin versionar" : "archivos sin versionar"}` : "", isolation.ignored ? `${isolation.ignored} ${isolation.ignored === 1 ? "ruta ignorada" : "rutas ignoradas"}` : ""].filter(Boolean).join(" y ");
+    lines.push(`⚠ No se copian al worktree: ${parts}${isolation.examples?.length ? ` (p. ej. ${isolation.examples.join(", ")})` : ""}. Si la tarea los necesita (.env, dependencias, archivos nuevos sin git add), fallará o verá un proyecto incompleto.`);
+  }
   if (engine === "antigravity") lines.push("⚠ SIN SANDBOX: Antigravity puede escribir fuera del worktree, usar la red y leer credenciales de tu cuenta.");
   else if (sandbox === "off") lines.push("⚠ SIN SANDBOX (PI_ORCHESTRATOR_YOLO_SANDBOX=off): puede escribir en cualquier ruta y usar la red.");
   else if (engine === "codex") lines.push("Sandbox de Codex: escribe solo en el directorio de trabajo y temporales, sin red.");

@@ -39,7 +39,10 @@ function git(args: string[], cwd: string, input?: string): Promise<string> {
 }
 
 /** Why a YOLO root would or would not get a worktree; nothing is created. */
-export type IsolationPreview = { isolated: true } | { isolated: false; reason: "not-git" | "no-commit" | "disabled" };
+/** `untracked`/`ignored`: entries the snapshot leaves out (`git stash create` copies tracked state only). */
+export type IsolationPreview = { isolated: true; untracked?: number; ignored?: number; examples?: string[] } | { isolated: false; reason: "not-git" | "no-commit" | "disabled" };
+
+const lines = (text: string) => text.split("\n").filter(Boolean);
 
 /** What isolate() would do for `cwd`, for the operator's confirmation. Read-only git queries. */
 export async function isolationPreview(cwd: string, enabled = true): Promise<IsolationPreview> {
@@ -47,7 +50,13 @@ export async function isolationPreview(cwd: string, enabled = true): Promise<Iso
   let root: string;
   try { root = (await git(["rev-parse", "--show-toplevel"], cwd)).trim(); } catch { return { isolated: false, reason: "not-git" }; }
   try { await git(["rev-parse", "--verify", "HEAD"], root); } catch { return { isolated: false, reason: "no-commit" }; }
-  return { isolated: true };
+  // Counted for the warning only; a failed count never blocks the confirmation.
+  try {
+    const untracked = lines(await git(["ls-files", "--others", "--exclude-standard"], root));
+    // --directory collapses ignored trees (node_modules/) into one entry.
+    const ignored = lines(await git(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"], root));
+    return { isolated: true, untracked: untracked.length, ignored: ignored.length, examples: [...ignored, ...untracked].slice(0, 3) };
+  } catch { return { isolated: true }; }
 }
 
 /**
