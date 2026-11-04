@@ -124,7 +124,7 @@ npm run check
 npm test
 ```
 
-La suite contiene 176 pruebas locales; última ejecución paralela completa: 176/176. Los anteriores fallos de deadline/censo motivaron watchdogs de fixtures adecuados para contención y reintentos acotados del censo desconocido, sin cambiar garantías de producción. Véase [RELIABILITY.md](RELIABILITY.md). `npm test` y usa motores simulados y procesos Node: **no ejecuta agentes reales ni consume sus cuotas**. La comprobación TypeScript y `npm audit --omit=dev` también pasaron (sin vulnerabilidades notificadas en dependencias de producción).
+La suite contiene 237 pruebas locales; última ejecución paralela completa: 237/237. Los anteriores fallos de deadline/censo motivaron watchdogs de fixtures adecuados para contención y reintentos acotados del censo desconocido, sin cambiar garantías de producción. Véase [RELIABILITY.md](RELIABILITY.md). `npm test` y usa motores simulados y procesos Node: **no ejecuta agentes reales ni consume sus cuotas**. La comprobación TypeScript y `npm audit --omit=dev` también pasaron (sin vulnerabilidades notificadas en dependencias de producción).
 
 ## Usar desde Pi, sin instalación global
 
@@ -338,6 +338,12 @@ Los lotes se agrupan por ejecución del agente: una tarea larga de una ejecució
 - El formato de respuesta de los motores (`src/worker-contract.ts`) se midió aislado (A/B, 6 tareas por motor): aciertos 6/6 en ambos, resultados un 12 % (Claude) y un 25 % (Codex) más cortos y tokens totales iguales. No se aplica a Antigravity: añadido a su prompt, las tareas anidadas restringidas fallaron (0/4 frente a 6/6).
 - Antigravity 1.4.5 en paralelo: 18/18 tras el arreglo de notificaciones previas a la sesión. Antigravity→Claude: 6/6 tras denegar sin abortar (antes fallaban ~2 de 13).
 - Coste fijo de una delegación trivial: unos 14 000 tokens con Claude y 36 000 con Codex. Por eso la herramienta indica no delegar lo que el modelo principal resuelve en uno o dos pasos (medido: en ese caso el modelo principal ya lo resuelve sin delegar).
+
+### Mejoras de eficiencia del 2026-11-04
+
+- **Comandos de solo lectura en Antigravity restricted** (`src/readonly-commands.ts`). Medido en vivo (1.4.5): leer, listar y buscar no piden permiso; solo `execute`, con `rawInput.CommandLine`. Una lista blanca (ls, du, ps, git log/status/diff, find sin `-exec`/`-delete`, docker/brew/npm de consulta…) se aprueba `allow_once` sin humano; lo demás sigue pidiendo aprobación. Rechaza `;`, `&&`, `||`, redirección a archivo, `$`, backticks y escapes; tuberías solo entre comandos permitidos. Sonda real, mismo prompt (tres comandos), Flash low: **diálogos humanos 3 → 0, duración 44 s → 31 s**, workspace intacto en ambas. Tests: 42 comandos de inspección permitidos y 63 de escritura o ejecución denegados. Desactivar: `PI_ORCHESTRATOR_ANTIGRAVITY_READONLY_AUTO=0`.
+- **Links `file://` → `ruta:línea`** (`src/result-links.ts`), antes de truncar. Sobre los 27 resultados del historial: **176 links → 0**, 187.445 → 176.829 caracteres (−5,7 % total; −9,0 % en los 10 resultados con links; unos 3.000 tokens). Los links apuntaban a worktrees ya borrados.
+- **Estimación de tokens de Antigravity**: sin contador propio, cuenta el pico de contexto (`context.peak`), una cota inferior de la entrada facturada. El tope `PI_ORCHESTRATOR_MAX_TOKENS` deja de ignorarlas. Cobertura del historial: tareas con medición **8/31 → 28/31**.
 
 ## Arquitectura
 
