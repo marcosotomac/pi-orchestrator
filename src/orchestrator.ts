@@ -8,6 +8,7 @@ import { RuntimeBudget } from "./budget.ts";
 import { InteractionBroker, type InteractionHandler } from "./interactions.ts";
 import { validateSelection, type ModelSelection } from "./model-selection.ts";
 import { diagnoseFailure } from "./diagnostics.ts";
+import { compactFileLinks } from "./result-links.ts";
 import { applyChanges, collectChanges, discardWorkspace, isolate, type IsolatedWorkspace } from "./workspace.ts";
 import { errorText, isTerminal, RuntimeCleanupError, validatePermissionMode, type PermissionMode } from "./types.ts";
 
@@ -429,6 +430,8 @@ export class Orchestrator {
       }
       if (typeof output !== "string" || !output.trim()) throw new Error("Runtime returned no result");
       output = this.redact(output, token);
+      // Before truncation: dead worktree links would otherwise consume the result budget.
+      output = compactFileLinks(output, [entry.effectiveCwd, entry.view.cwd]);
       // Discarding a long answer throws away every token the runtime spent on it.
       if (output.length > MAX_RESULT) {
         // The full answer is kept in a private file; the published result points to it.
@@ -476,7 +479,7 @@ export class Orchestrator {
         entry.view.result = output!;
       }
       if (entry.view.state !== "completed" && entry.partial?.trim()) {
-        let partial = this.redact(entry.partial, token);
+        let partial = compactFileLinks(this.redact(entry.partial, token), [entry.effectiveCwd, entry.view.cwd]);
         if (partial.length > MAX_RESULT - PARTIAL_NOTE.length) partial = partial.slice(0, MAX_RESULT - PARTIAL_NOTE.length - TRUNCATION_NOTE.length) + TRUNCATION_NOTE;
         entry.view.partialResult = partial + PARTIAL_NOTE;
       }
