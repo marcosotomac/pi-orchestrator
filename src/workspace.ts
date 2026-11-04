@@ -38,6 +38,18 @@ function git(args: string[], cwd: string, input?: string): Promise<string> {
   });
 }
 
+/** Why a YOLO root would or would not get a worktree; nothing is created. */
+export type IsolationPreview = { isolated: true } | { isolated: false; reason: "not-git" | "no-commit" | "disabled" };
+
+/** What isolate() would do for `cwd`, for the operator's confirmation. Read-only git queries. */
+export async function isolationPreview(cwd: string, enabled = true): Promise<IsolationPreview> {
+  if (!enabled) return { isolated: false, reason: "disabled" };
+  let root: string;
+  try { root = (await git(["rev-parse", "--show-toplevel"], cwd)).trim(); } catch { return { isolated: false, reason: "not-git" }; }
+  try { await git(["rev-parse", "--verify", "HEAD"], root); } catch { return { isolated: false, reason: "no-commit" }; }
+  return { isolated: true };
+}
+
 /**
  * Creates a detached worktree at a snapshot of the operator's tracked state
  * (commit + staged + unstaged, via `git stash create`; untracked files are not

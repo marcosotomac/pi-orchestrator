@@ -1,6 +1,6 @@
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { defaultEffort } from "./adapters/codex.ts";
-import { isTerminal, type TaskUsage, type TaskView } from "./types.ts";
+import { isTerminal, type Engine, type TaskUsage, type TaskView } from "./types.ts";
 
 /** Provider output is untrusted terminal data: no OSC links, escapes, or control bytes. */
 export function safeText(text: string): string {
@@ -410,10 +410,34 @@ export function contextLabel(task: TaskView): string | undefined {
   return `contexto ${k(task.context.used)} de ${k(task.context.size)}`;
 }
 
+const ISOLATION_TEXT: Record<"not-git" | "no-commit" | "disabled", string> = {
+  "not-git": "⚠ SIN AISLAMIENTO: no es un repositorio git; escribirá directamente en tus archivos.",
+  "no-commit": "⚠ SIN AISLAMIENTO: el repositorio no tiene commits; escribirá directamente en tus archivos.",
+  disabled: "⚠ SIN AISLAMIENTO: PI_ORCHESTRATOR_ISOLATE_WRITES=0; escribirá directamente en tus archivos.",
+};
+
+/**
+ * Body of the YOLO confirmation. Must match what the adapters really enforce:
+ * a worktree only separates checkouts, and only Codex/Claude add an OS sandbox.
+ * Antigravity's adapter has none (measured: no sandbox flag reaches its runtime).
+ */
+export function yoloConfirmation(engine: Engine, isolation: { isolated: true } | { isolated: false; reason: "not-git" | "no-commit" | "disabled" }, sandbox: "on" | "off"): string {
+  const lines = ["Ejecutará comandos y modificará archivos SIN pedir aprobación."];
+  lines.push(isolation.isolated
+    ? "Trabaja en un worktree aislado: tu checkout no se toca y tú revisas el diff antes de aplicarlo. Un worktree separa archivos del repositorio; no es un sandbox."
+    : ISOLATION_TEXT[isolation.reason]);
+  if (engine === "antigravity") lines.push("⚠ SIN SANDBOX: Antigravity puede escribir fuera del worktree, usar la red y leer credenciales de tu cuenta.");
+  else if (sandbox === "off") lines.push("⚠ SIN SANDBOX (PI_ORCHESTRATOR_YOLO_SANDBOX=off): puede escribir en cualquier ruta y usar la red.");
+  else if (engine === "codex") lines.push("Sandbox de Codex: escribe solo en el directorio de trabajo y temporales, sin red.");
+  else lines.push("Sandbox de Claude Code solo para Bash (sin red). Write/Edit no pasan por ese sandbox y pueden escribir fuera del worktree.");
+  lines.push("Confirma solo si tú lo pediste explícitamente.");
+  return lines.join("\n");
+}
+
 /** One line about a YOLO task's isolated changes, or undefined. */
 export function changesLine(task: TaskView): string | undefined {
   const changes = task.changes;
-  if (task.workspace === "in-place") return "Sin aislamiento: no es un repositorio git; los cambios se escribieron directamente.";
+  if (task.workspace === "in-place") return "Sin aislamiento (no es un repositorio git con commits, o el aislamiento está desactivado): los cambios se escribieron directamente.";
   if (!changes) return task.workspace === "worktree" && !isTerminal(task) ? "Escribe en un worktree aislado; tu repositorio no se toca." : undefined;
   if (changes.state === "none") return "Sin cambios en archivos.";
   const size = `${changes.files} ${changes.files === 1 ? "archivo" : "archivos"} · +${changes.insertions} −${changes.deletions}`;
@@ -432,7 +456,7 @@ export function helpText(advanced: string): string {
     "  y copiar · a aplicar cambios · x descartar cambios · c cancelar (y sus subtareas) · d detalles · f filtro",
     "  PgUp/PgDn leer · Esc volver",
     "",
-    "YOLO en un repositorio git: la tarea escribe en un worktree aislado y con sandbox;",
+    "YOLO en un repositorio git con commits: la tarea escribe en un worktree aislado (no es un sandbox; Antigravity no tiene sandbox);",
     "  tú revisas el diff y lo aplicas (a o /orch apply ID) o lo descartas (x o /orch discard ID).",
     "",
     "Comandos: status · result ID · cancel ID · apply ID · discard ID · usage · engines · history · reset",

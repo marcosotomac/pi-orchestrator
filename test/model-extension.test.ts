@@ -40,6 +40,8 @@ test("/orch natural instructions queue a Pi turn without fixed settings, selecto
     await assert.rejects(delegate.execute("yolo-declined", { engine: "antigravity", prompt: "fixture", permissionMode: "yolo" }, undefined, undefined, tui(false)), /did not confirm YOLO/);
     assert.equal(live(), before, "a declined or headless YOLO request must not start a task");
     assert.match(prompts.at(-1)!, /SIN pedir aprobación/);
+    assert.match(prompts.at(-1)!, /SIN SANDBOX: Antigravity puede escribir fuera del worktree/, "the dialog must not promise a sandbox Antigravity lacks");
+    assert.doesNotMatch(prompts.at(-1)!, /aislado con sandbox/);
     for (const [engine, model] of [["antigravity", "gemini-3.8-flash"], ["codex", "chosen"], ["claude", "sonnet"]]) {
       await delegate.execute(`tool-${engine}`, { engine, prompt: "fixture", model, thinking: "high", ...(engine === "antigravity" ? { permissionMode: "yolo" } : {}) }, undefined, undefined, engine === "antigravity" ? tui(true) : ctx);
       const task: TaskView = service!.core.list().at(-1)!;

@@ -196,7 +196,7 @@ test("pending changes show in the panel with apply/discard keys, and the model i
   assert.deepEqual(other.actions, [], "nothing pending: no discard");
   const model = modelTask(done, "include") as any;
   assert.equal(model.changes.files, 2); assert.match(model.changes.note, /NO están en el repo/);
-  assert.equal(changesLine(task("p", { workspace: "in-place", state: "completed" })), "Sin aislamiento: no es un repositorio git; los cambios se escribieron directamente.");
+  assert.equal(changesLine(task("p", { workspace: "in-place", state: "completed" })), "Sin aislamiento (no es un repositorio git con commits, o el aislamiento está desactivado): los cambios se escribieron directamente.");
 });
 
 test("titles are short and human; a repeated cancelled task reads as superseded; live work comes first", async () => {

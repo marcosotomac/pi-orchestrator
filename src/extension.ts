@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { TaskDashboard, type PanelAction } from "./dashboard.ts";
-import { displayTitle, engineName, groupedRows, shortTitle, resolveTask, safeText, summary, taskLine, taskRows, taskCard, taskCardParts, taskRow, urgentRows, isStalled, modelLabel, failureAdvice, friendlyError, formatInteractionDetail, helpText, usageReport, type Attention } from "./presentation.ts";
+import { displayTitle, engineName, groupedRows, shortTitle, resolveTask, safeText, summary, taskLine, taskRows, taskCard, taskCardParts, taskRow, urgentRows, isStalled, modelLabel, failureAdvice, friendlyError, formatInteractionDetail, helpText, usageReport, yoloConfirmation, type Attention } from "./presentation.ts";
 import { createService } from "./service.ts";
 import { DeliveryLedger, modelTask } from "./model-view.ts";
 import { RunStore, type HistoryPage, type RunRecord } from "./journal.ts";
@@ -14,7 +14,11 @@ import { productDefaults, runtimeConfiguration } from "./configuration.ts";
 import { detectAntigravity } from "./antigravity-installation.ts";
 import { planRecovery, recoveryWarning } from "./recovery.ts";
 import { processCensus, reconcileRun, reconciliationWarning } from "./reconciliation.ts";
-import { errorText, isTerminal, type Engine, type TaskView } from "./types.ts";
+import { errorText, isTerminal, yoloSandbox, type Engine, type TaskView } from "./types.ts";
+import { isolationPreview } from "./workspace.ts";
+
+/** Same precedence as the service: product default, then the environment. */
+const isolationEnabled = () => { try { return ({ ...productDefaults, ...runtimeConfiguration() }).isolateWrites !== false; } catch { return true; } };
 
 type TerminalHandle = { terminal: { write(data: string): void }; requestRender(): void };
 
@@ -364,7 +368,8 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
         if (params.permissionMode === "yolo") {
           if (ctx.mode !== "tui" || !ctx.hasUI) throw new Error("YOLO requires explicit human confirmation in the Pi TUI; the task was not started");
           const target = [params.engine, params.model, params.thinking].filter(Boolean).join(" · ");
-          const accepted = await ctx.ui.confirm("Autorizar YOLO para esta tarea", safeText(`${target}\n\nEjecutará comandos y modificará archivos SIN pedir aprobación. En un repositorio git trabaja en un worktree aislado con sandbox (sin red): tú revisas el diff y decides si aplicarlo. Fuera de git escribe directamente. Confirma solo si tú lo pediste explícitamente.\n\nTarea:\n${params.prompt.slice(0, 800)}${params.prompt.length > 800 ? "…" : ""}`), { signal });
+          const isolation = await isolationPreview(resolve(ctx.cwd, params.cwd ?? "."), isolationEnabled());
+          const accepted = await ctx.ui.confirm("Autorizar YOLO para esta tarea", safeText(`${target}\n\n${yoloConfirmation(params.engine, isolation, yoloSandbox())}\n\nTarea:\n${params.prompt.slice(0, 800)}${params.prompt.length > 800 ? "…" : ""}`), { signal });
           signal?.throwIfAborted();
           if (!accepted) throw new Error("The operator did not confirm YOLO; the task was not started. Ask before retrying, or delegate without permissionMode.");
         }
@@ -488,7 +493,7 @@ export function createOrchestratorExtension(serviceFactory: typeof createService
             return true;
           }
           case "retry": {
-            if (task.permissionMode === "yolo" && !await ctx.ui.confirm("Reintentar con YOLO", safeText(`${task.engine} · ${task.title}\n\nEl reintento volverá a ejecutar comandos y modificar archivos SIN pedir aprobación.`))) return true;
+            if (task.permissionMode === "yolo" && !await ctx.ui.confirm("Reintentar con YOLO", safeText(`${task.engine} · ${task.title}\n\nEl reintento vuelve a ejecutarlo todo.\n${yoloConfirmation(task.engine, await isolationPreview(task.cwd, isolationEnabled()), yoloSandbox())}`))) return true;
             message(core.retry(null, task.id, randomUUID()));
             ctx.ui.notify("Reintento iniciado como una tarea nueva.", "info");
             return true;

@@ -29,7 +29,7 @@ export function modelTask(task: TaskView, policy: ResultPolicy): Record<string, 
     ...(!usage && task.context ? { contextTokens: task.context.peak ?? task.context.used } : {}),
     ...(task.error ? { error: safeText(task.error).slice(0, 2_000) } : {}),
     ...(task.diagnostic ? { recovery: task.diagnostic.recovery } : {}),
-    ...(task.workspace === "in-place" ? { workspace: "in-place (not a git repository: changes were written directly)" } : {}),
+    ...(task.workspace === "in-place" ? { workspace: "in-place (no git repository with a commit, or isolation disabled: changes were written directly)" } : {}),
     ...(task.changes && task.changes.state !== "none" ? { changes: {
       state: task.changes.state, files: task.changes.files, insertions: task.changes.insertions, deletions: task.changes.deletions,
       summary: safeText(task.changes.summary).slice(0, 1_500),
