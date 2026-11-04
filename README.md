@@ -124,7 +124,7 @@ npm run check
 npm test
 ```
 
-La suite contiene 237 pruebas locales; última ejecución paralela completa: 237/237. Los anteriores fallos de deadline/censo motivaron watchdogs de fixtures adecuados para contención y reintentos acotados del censo desconocido, sin cambiar garantías de producción. Véase [RELIABILITY.md](RELIABILITY.md). `npm test` y usa motores simulados y procesos Node: **no ejecuta agentes reales ni consume sus cuotas**. La comprobación TypeScript y `npm audit --omit=dev` también pasaron (sin vulnerabilidades notificadas en dependencias de producción).
+La suite contiene 240 pruebas locales; última ejecución paralela completa: 240/240. Los anteriores fallos de deadline/censo motivaron watchdogs de fixtures adecuados para contención y reintentos acotados del censo desconocido, sin cambiar garantías de producción. Véase [RELIABILITY.md](RELIABILITY.md). `npm test` y usa motores simulados y procesos Node: **no ejecuta agentes reales ni consume sus cuotas**. La comprobación TypeScript y `npm audit --omit=dev` también pasaron (sin vulnerabilidades notificadas en dependencias de producción).
 
 ## Usar desde Pi, sin instalación global
 
