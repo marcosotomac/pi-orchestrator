@@ -11,6 +11,9 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
+    "format": "prettier --write src test scripts/*.ts .github package.json tsconfig.json",
+    "format:check": "prettier --check src test scripts/*.ts .github package.json tsconfig.json",
+    "verify:offline": "npm run check && npm run format:check && npm test && npm run test:installer",
     "test": "node --import tsx --test test/*.test.ts",
     "smoke:live": "tsx scripts/live-smoke.ts",
     "smoke:cancel": "tsx scripts/live-cancel.ts",
@@ -23,10 +26,8 @@
     "smoke:antigravity-nested": "tsx scripts/live-antigravity-nested.ts",
     "test:tui": "python3 test/tui_harness_test.py && python3 scripts/tui-smoke.py",
     "bench:live": "tsx scripts/bench-live.ts",
-    "verify": "npm run check && npm test && npm run test:tui",
-    "verify:live": "npm run verify && tsx scripts/live-matrix.ts",
-    "format": "prettier --write src test scripts/*.ts .github package.json tsconfig.json",
-    "format:check": "prettier --check src test scripts/*.ts .github package.json tsconfig.json"
+    "verify": "npm run verify:offline && npm run test:tui",
+    "verify:live": "npm run verify && tsx scripts/live-matrix.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
@@ -42,8 +43,8 @@
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@earendil-works/pi-tui": "1.4.0",
     "@types/node": "^24.0.0",
+    "prettier": "3.6.2",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0",
-    "prettier": "3.6.2"
+    "typescript": "^5.9.0"
   }
 }
