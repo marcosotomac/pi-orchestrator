@@ -180,6 +180,7 @@ export function formatTokens(usage?: TaskUsage): string | undefined {
   const total = usage.inputTokens + usage.outputTokens;
   const parts = [`${k(total)} tokens`];
   if (usage.cachedInputTokens) parts.push(`${k(usage.cachedInputTokens)} de caché`);
+  if (usage.cacheWriteTokens) parts.push(`${k(usage.cacheWriteTokens)} escritos en caché`);
   if (usage.reasoningTokens) parts.push(`${k(usage.reasoningTokens)} razonando`);
   if (usage.costUsd !== undefined) parts.push(`~$${usage.costUsd.toFixed(usage.costUsd < 0.1 ? 3 : 2)}`);
   return parts.join(" · ");
@@ -489,6 +490,7 @@ export function usageReport(usage: { runtimeMs: number; maxRuntimeMs?: number; a
     const total = reported.reduce<TaskUsage>((sum, task) => ({
       inputTokens: sum.inputTokens + task.usage!.inputTokens, cachedInputTokens: sum.cachedInputTokens + task.usage!.cachedInputTokens,
       outputTokens: sum.outputTokens + task.usage!.outputTokens, reasoningTokens: (sum.reasoningTokens ?? 0) + (task.usage!.reasoningTokens ?? 0),
+      ...(sum.cacheWriteTokens !== undefined || task.usage!.cacheWriteTokens !== undefined ? { cacheWriteTokens: (sum.cacheWriteTokens ?? 0) + (task.usage!.cacheWriteTokens ?? 0) } : {}),
       ...(sum.costUsd !== undefined || task.usage!.costUsd !== undefined ? { costUsd: (sum.costUsd ?? 0) + (task.usage!.costUsd ?? 0) } : {}),
     }), { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
     lines.push(`Tokens reportados por los motores: ${formatTokens(total)} (${reported.length} de ${tasks.length} tareas)`);

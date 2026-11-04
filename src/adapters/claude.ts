@@ -141,7 +141,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
           const usage = message.usage;
           if (usage && typeof usage === "object") {
             const read = Number(usage.cache_read_input_tokens ?? 0), created = Number(usage.cache_creation_input_tokens ?? 0);
-            try { context.usage?.({ inputTokens: Number(usage.input_tokens ?? 0) + read + created, cachedInputTokens: read, outputTokens: Number(usage.output_tokens ?? 0),
+            try { context.usage?.({ inputTokens: Number(usage.input_tokens ?? 0) + read + created, cachedInputTokens: read, outputTokens: Number(usage.output_tokens ?? 0), cacheWriteTokens: created,
               ...(typeof message.total_cost_usd === "number" ? { costUsd: message.total_cost_usd } : {}) }); }
             catch { /* observer only */ }
           }

@@ -26,9 +26,11 @@ function validUsage(value: TaskUsage): TaskUsage | undefined {
   const count = (n: unknown) => typeof n === "number" && Number.isSafeInteger(n) && n >= 0 && n < 1e12;
   if (!value || !count(value.inputTokens) || !count(value.cachedInputTokens) || !count(value.outputTokens)) return undefined;
   if (value.reasoningTokens !== undefined && !count(value.reasoningTokens)) return undefined;
+  if (value.cacheWriteTokens !== undefined && !count(value.cacheWriteTokens)) return undefined;
   if (value.costUsd !== undefined && !(typeof value.costUsd === "number" && Number.isFinite(value.costUsd) && value.costUsd >= 0 && value.costUsd < 1e6)) return undefined;
   return { inputTokens: value.inputTokens, cachedInputTokens: Math.min(value.cachedInputTokens, value.inputTokens), outputTokens: value.outputTokens,
-    ...(value.reasoningTokens !== undefined ? { reasoningTokens: value.reasoningTokens } : {}), ...(value.costUsd !== undefined ? { costUsd: value.costUsd } : {}) };
+    ...(value.reasoningTokens !== undefined ? { reasoningTokens: value.reasoningTokens } : {}),
+    ...(value.cacheWriteTokens !== undefined ? { cacheWriteTokens: Math.min(value.cacheWriteTokens, value.inputTokens) } : {}), ...(value.costUsd !== undefined ? { costUsd: value.costUsd } : {}) };
 }
 
 interface Entry {
@@ -350,6 +352,7 @@ export class Orchestrator {
           const clean: TaskUsage = base ? {
             inputTokens: Math.max(0, raw.inputTokens - base.inputTokens), cachedInputTokens: Math.max(0, raw.cachedInputTokens - base.cachedInputTokens), outputTokens: Math.max(0, raw.outputTokens - base.outputTokens),
             ...(raw.reasoningTokens !== undefined ? { reasoningTokens: Math.max(0, raw.reasoningTokens - (base.reasoningTokens ?? 0)) } : {}),
+            ...(raw.cacheWriteTokens !== undefined ? { cacheWriteTokens: Math.max(0, raw.cacheWriteTokens - (base.cacheWriteTokens ?? 0)) } : {}),
             ...(raw.costUsd !== undefined ? { costUsd: Math.max(0, raw.costUsd - (base.costUsd ?? 0)) } : {}),
           } : raw;
           if (clean.cachedInputTokens > clean.inputTokens) clean.cachedInputTokens = clean.inputTokens;
@@ -357,6 +360,7 @@ export class Orchestrator {
           entry.view.usage = carry ? {
             inputTokens: carry.inputTokens + clean.inputTokens, cachedInputTokens: carry.cachedInputTokens + clean.cachedInputTokens, outputTokens: carry.outputTokens + clean.outputTokens,
             ...(carry.reasoningTokens !== undefined || clean.reasoningTokens !== undefined ? { reasoningTokens: (carry.reasoningTokens ?? 0) + (clean.reasoningTokens ?? 0) } : {}),
+            ...(carry.cacheWriteTokens !== undefined || clean.cacheWriteTokens !== undefined ? { cacheWriteTokens: (carry.cacheWriteTokens ?? 0) + (clean.cacheWriteTokens ?? 0) } : {}),
             ...(carry.costUsd !== undefined || clean.costUsd !== undefined ? { costUsd: (carry.costUsd ?? 0) + (clean.costUsd ?? 0) } : {}),
           } : clean;
           // Display-only: the final settle checkpoint persists it without an fsync per update.

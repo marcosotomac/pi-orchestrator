@@ -62,6 +62,7 @@ test("human rows carry no IDs and keep status visible on narrow terminals", () =
 
 test("tokens, Spanish errors, default effort and permission details are readable and sanitized", () => {
   assert.equal(formatTokens({ inputTokens: 45_000, cachedInputTokens: 38_000, outputTokens: 2_100, reasoningTokens: 900 }), "47k tokens · 38k de caché · 900 razonando");
+  assert.equal(formatTokens({ inputTokens: 45_000, cachedInputTokens: 38_000, outputTokens: 2_100, cacheWriteTokens: 6_800, costUsd: 0.05 }), "47k tokens · 38k de caché · 7k escritos en caché · ~$0.050");
   assert.equal(formatTokens({ inputTokens: 900, cachedInputTokens: 0, outputTokens: 50, costUsd: 0.0123 }), "950 tokens · ~$0.012");
   assert.equal(formatTokens(undefined), undefined);
   assert.equal(friendlyError("Task deadline exceeded"), "Se agotó el plazo de la tarea (PI_ORCHESTRATOR_TASK_TIMEOUT_MS).");

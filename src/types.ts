@@ -35,6 +35,8 @@ export interface TaskUsage {
   cachedInputTokens: number;
   outputTokens: number;
   reasoningTokens?: number;
+  /** Part of inputTokens written to the prompt cache (Claude bills it above base input). */
+  cacheWriteTokens?: number;
   costUsd?: number;
 }
 

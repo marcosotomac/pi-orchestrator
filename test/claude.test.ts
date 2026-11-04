@@ -115,7 +115,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
         assert.deepEqual(sessions, ["fixture-session"]);
         assert.deepEqual(models, ["claude-fixture-model"], "the model the CLI resolved is recorded");
         // Cache reads/creations count as input; cost is the CLI's own estimate.
-        if (mode === "success") assert.deepEqual(usages, [{ inputTokens: 3620, cachedInputTokens: 3000, outputTokens: 80, costUsd: 0.0421 }]);
+        if (mode === "success") assert.deepEqual(usages, [{ inputTokens: 3620, cachedInputTokens: 3000, outputTokens: 80, cacheWriteTokens: 500, costUsd: 0.0421 }]);
       }
       assert.ok(observations.at(-1)?.exitedAt, "Exit must be observed before the adapter settles");
       if (mode !== "early-abort") {

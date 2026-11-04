@@ -29,7 +29,7 @@ const taskSchema = z.object({
   context: z.object({ used: z.number().int().nonnegative(), size: z.number().int().positive(), peak: z.number().int().nonnegative().optional() }).strict().optional(),
   workspace: z.enum(["worktree", "in-place"]).optional(),
   changes: z.object({ state: z.enum(["pending", "applied", "discarded", "none"]), files: z.number().int().nonnegative(), insertions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(), summary: z.string().max(4_000), repo: z.string().max(8_192).optional(), worktree: z.string().max(8_192).optional(), patchPath: z.string().max(8_192).optional(), base: z.string().max(64).optional(), error: z.string().max(500).optional() }).strict().optional(),
-  usage: z.object({ inputTokens: z.number().int().nonnegative(), cachedInputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), reasoningTokens: z.number().int().nonnegative().optional(), costUsd: z.number().nonnegative().optional() }).strict().optional(),
+  usage: z.object({ inputTokens: z.number().int().nonnegative(), cachedInputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), reasoningTokens: z.number().int().nonnegative().optional(), cacheWriteTokens: z.number().int().nonnegative().optional(), costUsd: z.number().nonnegative().optional() }).strict().optional(),
 }).strict();
 const runSchema = z.object({
   schemaVersion: z.literal(1), runId: id, ownerPid: z.number().int().positive(), cwd: z.string().min(1).max(8_192),
