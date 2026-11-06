@@ -47,6 +47,12 @@ function git(args: string[], cwd: string, input?: string): Promise<string> {
     const out: Buffer[] = [],
       err: Buffer[] = [];
     let size = 0;
+    let inputError: Error | undefined;
+    // Git can exit before consuming stdin. Stream errors are separate from
+    // child-process errors; wait for close to preserve Git's stderr on failure.
+    child.stdin.on("error", (error: Error) => {
+      inputError = error;
+    });
     const timer = setTimeout(() => child.kill("SIGKILL"), 120_000);
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.length;
@@ -63,7 +69,8 @@ function git(args: string[], cwd: string, input?: string): Promise<string> {
     child.on("close", (code) => {
       clearTimeout(timer);
       const stdout = Buffer.concat(out).toString("utf8");
-      if (code === 0) resolve(stdout);
+      if (code === 0 && inputError) reject(inputError);
+      else if (code === 0) resolve(stdout);
       else
         reject(
           new Error(
