@@ -106,6 +106,9 @@ export interface OrchestrationMetrics {
   /** Wait calls (each one a model turn of the caller) and the tasks they covered. */
   waitCalls: number;
   waitedTasks: number;
+  /** Main-model wake-ups by the host: finished batches, and early ones for a failure. */
+  batchWakes: number;
+  earlyFailureWakes: number;
 }
 
 export interface OrchestratorOptions {
@@ -165,6 +168,8 @@ export class Orchestrator {
     queueWaitMsMax: 0,
     waitCalls: 0,
     waitedTasks: 0,
+    batchWakes: 0,
+    earlyFailureWakes: 0,
   };
   /** Leaf children waiting for a slot; dispatched before roots. */
   private leafQueue: string[] = [];
@@ -1453,6 +1458,12 @@ export class Orchestrator {
       if (onAbort) signal?.removeEventListener("abort", onAbort);
     }
     return this.status(callerId, id);
+  }
+
+  /** Host bookkeeping: the extension reports each time it wakes the main model. */
+  noteWake(kind: "batch" | "earlyFailure"): void {
+    if (kind === "batch") this.metrics.batchWakes++;
+    else this.metrics.earlyFailureWakes++;
   }
 
   /**

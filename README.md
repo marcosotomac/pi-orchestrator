@@ -134,7 +134,7 @@ Suite secuencial histórica: **166/166**; evidencia `artifacts/interactive-sched
 
 La extensión guarda el historial en `~/.pi/agent/orchestrator-state` (directorio 0700, archivos 0600). `PI_ORCHESTRATOR_STATE_DIR` elige otro directorio y `PI_ORCHESTRATOR_STATE_DIR=off` lo desactiva. Retención: se conservan los 100 runs más recientes; solo se borran runs más antiguos con cierre registrado y archivo válido (nunca runs sin cierre, que podrían seguir vivos, ni archivos inválidos). La actividad se escribe en disco como mucho cada 5 s por tarea (medido en una tarea real de Codex: 18 → 11 escrituras); el cierre de cada tarea siempre se escribe.
 
-Los lotes se agrupan por ejecución del agente: una tarea larga de una ejecución anterior no retrasa los resultados de un lote posterior más rápido.
+Los lotes se agrupan por ejecución del agente: una tarea larga de una ejecución anterior no retrasa los resultados de un lote posterior más rápido. Si una tarea del lote **falla** mientras sus hermanas siguen en curso, el modelo se despierta en ese momento solo con el fallo, para que pueda volver a delegar sin esperar a la más lenta; el resto llega después en otro mensaje y nada se entrega dos veces. Cuesta un turno extra solo cuando hay un fallo; `PI_ORCHESTRATOR_EARLY_FAILURE_WAKE=0` lo desactiva. `/orch usage` cuenta ambos tipos de despertar.
 
 ## Verificación
 

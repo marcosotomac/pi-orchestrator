@@ -170,6 +170,11 @@ export const settingsRegistry: readonly {
     description: "historial (ruta|off)",
   },
   {
+    name: "PI_ORCHESTRATOR_EARLY_FAILURE_WAKE",
+    fallback: "1",
+    description: "despertar al modelo ante un fallo sin esperar al lote (0|1)",
+  },
+  {
     name: "PI_ORCHESTRATOR_NOTIFY",
     fallback: "desktop",
     description: "avisos (desktop|bell|off)",
