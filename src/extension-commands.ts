@@ -7,6 +7,7 @@ import { type Service } from "./service.ts";
 import { RunStore } from "./journal.ts";
 import { resolveTask, safeText, usageReport } from "./presentation.ts";
 import { detectAntigravity } from "./antigravity-installation.ts";
+import { configurationReport } from "./configuration.ts";
 import { planRecovery, recoveryWarning } from "./recovery.ts";
 import { processCensus, reconcileRun } from "./reconciliation.ts";
 import { isTerminal, type Engine, type TaskView } from "./types.ts";
@@ -43,7 +44,7 @@ export function registerOrchestratorCommands(
       const instruction = args.trim();
       const [verb = "", argument, ...rest] = instruction.split(/\s+/);
       const administrative =
-        /^(?:help|--help|engines|usage|reset|panel|history|status|demo)$/.test(
+        /^(?:help|--help|engines|usage|config|reset|panel|history|status|demo)$/.test(
           instruction,
         ) ||
         /^(?:capabilities|result|cancel|inspect|reconcile|apply|discard)\s+[\w-]+$/.test(
@@ -92,6 +93,13 @@ export function registerOrchestratorCommands(
       }
       if (verb === "engines") {
         message({ installation: detectAntigravity() });
+        return;
+      }
+      if (verb === "config") {
+        message(
+          { report: configurationReport() },
+          "[Configuración del orquestador mostrada al operador]",
+        );
         return;
       }
       if (verb === "usage") {

@@ -134,7 +134,7 @@ async function copyText(
 }
 
 const usage =
-  "/orch [panel] | start codex|claude|antigravity PROMPT | run codex|claude|antigravity PROMPT | status | result ID | cancel ID | apply ID | discard ID | reset | demo | history | inspect RUN | reconcile RUN | restart RUN TASK --accept-duplicate-risk PROMPT | engines | usage | capabilities TASK | steer TASK TEXT | resume TASK TEXT";
+  "/orch [panel] | start codex|claude|antigravity PROMPT | run codex|claude|antigravity PROMPT | status | result ID | cancel ID | apply ID | discard ID | reset | demo | history | inspect RUN | reconcile RUN | restart RUN TASK --accept-duplicate-risk PROMPT | engines | usage | config | capabilities TASK | steer TASK TEXT | resume TASK TEXT";
 const demoPrompt =
   "You must delegate exactly one task to the claude engine using the pi_orchestrator MCP delegate tool: compute 17 * 19 and explain in one sentence. Use requestKey 'arithmetic-review'. Wait for the task to complete with the MCP wait tool. Return its task id, status and answer. Do not solve it yourself or launch other workers.";
 

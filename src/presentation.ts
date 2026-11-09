@@ -907,13 +907,11 @@ export function helpText(advanced: string): string {
     "YOLO en un repositorio git con commits: la tarea escribe en un worktree aislado (no es un sandbox; Antigravity no tiene sandbox);",
     "  tú revisas el diff y lo aplicas (a o /orch apply ID) o lo descartas (x o /orch discard ID).",
     "",
-    "Comandos: status · result ID · cancel ID · apply ID · discard ID · usage · engines · history · reset",
+    "Comandos: status · result ID · cancel ID · apply ID · discard ID · usage · config · engines · history · reset",
     "Avanzado:",
     `  ${advanced.split(" | ").join("\n  ")}`,
     "",
-    "Variables: PI_ORCHESTRATOR_TASK_TIMEOUT_MS · PI_ORCHESTRATOR_CODEX_DEFAULT_THINKING ·",
-    "  PI_ORCHESTRATOR_CLAUDE_MAX_TURNS · PI_ORCHESTRATOR_MAX_TASKS · PI_ORCHESTRATOR_NOTIFY (desktop|bell|off) ·",
-    "  PI_ORCHESTRATOR_ALLOWED_ROOTS · PI_ORCHESTRATOR_YOLO_SANDBOX (on|off) · PI_ORCHESTRATOR_STATE_DIR (ruta|off)",
+    "Variables PI_ORCHESTRATOR_*: /orch config muestra todas, su valor efectivo y su origen.",
   ].join("\n");
 }
 

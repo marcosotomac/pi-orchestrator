@@ -4,7 +4,7 @@ Orquestación de **runtimes reales** de Codex y Claude Code desde Pi, con delega
 
 ## Estado
 
-Prototipo experimental con 250 pruebas locales (`npm test`, sin cuota) y matrices reales probadas en las direcciones Pi → Codex ⇄ Claude ⇄ Antigravity: delegación anidada, cancelación del árbol completo, elección de herramientas por el modelo principal de Pi y persistencia opcional. No es un sistema de producción.
+Prototipo experimental con 252 pruebas locales (`npm test`, sin cuota) y matrices reales probadas en las direcciones Pi → Codex ⇄ Claude ⇄ Antigravity: delegación anidada, cancelación del árbol completo, elección de herramientas por el modelo principal de Pi y persistencia opcional. No es un sistema de producción.
 
 Documentación detallada:
 
@@ -28,7 +28,7 @@ npm run check
 npm test
 ```
 
-La suite contiene 250 pruebas locales; última ejecución paralela completa: 250/250. Los anteriores fallos de deadline/censo motivaron watchdogs de fixtures adecuados para contención y reintentos acotados del censo desconocido, sin cambiar garantías de producción. Véase [RELIABILITY.md](RELIABILITY.md). `npm test` y usa motores simulados y procesos Node: **no ejecuta agentes reales ni consume sus cuotas**. La comprobación TypeScript y `npm audit --omit=dev` también pasaron (sin vulnerabilidades notificadas en dependencias de producción).
+La suite contiene 252 pruebas locales; última ejecución paralela completa: 252/252. Los anteriores fallos de deadline/censo motivaron watchdogs de fixtures adecuados para contención y reintentos acotados del censo desconocido, sin cambiar garantías de producción. Véase [RELIABILITY.md](RELIABILITY.md). `npm test` y usa motores simulados y procesos Node: **no ejecuta agentes reales ni consume sus cuotas**. La comprobación TypeScript y `npm audit --omit=dev` también pasaron (sin vulnerabilidades notificadas en dependencias de producción).
 
 ## Usar desde Pi, sin instalación global
 
@@ -112,6 +112,7 @@ Pruebas nativas de lectura, workspace intacto y salida observada: `artifacts/nat
 - En modo restringido, Antigravity traslada solicitudes adicionales a confirmación/selección humana en Pi. Permisos adicionales solo ofrecen `allow_once`, nunca aprobación persistente. Sin TUI, al expirar o sin handler, la operación se deniega (`cancelled`) y el turno continúa sin ella, como en Codex y Claude; el resultado lleva un aviso con el número de denegaciones. Más de 8 denegaciones, una petición de otra sesión o fuera del turno vivo siguen haciendo fallar la tarea. Texto externo no confiable y detalles redactados; las respuestas tardías pierden autoridad. Codex/Claude no ganan permisos interactivos.
 - `PI_ORCHESTRATOR_QUEUE=fair` es el valor por defecto de la extensión: cola limitada de raíces, FIFO por motor y round-robin entre motores (no equidad multiusuario). `reject` restaura el rechazo inmediato. `PI_ORCHESTRATOR_MAX_QUEUED` y `PI_ORCHESTRATOR_RESERVED_CHILD_SLOTS` ajustan límites; los hijos rechazan saturación en vez de esperar detrás de sus ancestros.
 - `PI_ORCHESTRATOR_MAX_RUNTIME_MS` limita la suma monotónica de milisegundos ocupados por slots de runtime, incluidos padres esperando. Al agotarse cierra admisión y cancela activos/pendientes; el cleanup puede exceder el límite. No mide CPU, tokens ni facturación. `/orch usage` informa consumo y coste monetario no disponible.
+- `/orch config`: muestra todas las variables `PI_ORCHESTRATOR_*`, su valor efectivo, si viene del entorno o del valor predeterminado, si la configuración es válida y qué variables con ese prefijo no se reconocen (p. ej. erratas). No inicia el servicio. Una prueba exige que toda variable leída en `src/` esté en el registro (`settingsRegistry` en `src/configuration.ts`).
 - También se validan `PI_ORCHESTRATOR_MAX_CONCURRENT`, `MAX_TASKS`, `MAX_DEPTH` e `INTERACTION_TIMEOUT_MS` con el mismo prefijo completo.
 
 Suite secuencial histórica: **166/166**; evidencia `artifacts/interactive-scheduling-tests.log`. Los smokes nuevos también verificaron Pi→Antigravity→Codex y cancelación Codex→Antigravity. Un intento Pi anterior falló por red sin crear tareas y se conserva en `artifacts/cases-pi-nested-antigravity-xsBb86/report.json`. No extrapolar estos casos a garantías de producción ni a pruebas de supervisor SSH.
