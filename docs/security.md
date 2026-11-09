@@ -1,0 +1,45 @@
+# Seguridad, permisos y YOLO
+
+Qué impone realmente cada motor y qué no garantiza el prototipo.
+
+[← README](../README.md)
+
+## Escritura aislada (YOLO) y sandbox
+
+- Una tarea raíz YOLO en un repositorio git corre en un **worktree privado**, creado desde una instantánea de tu estado: el último commit más los cambios staged y unstaged, mediante `git stash create`. Los archivos sin seguimiento no se incluyen. Sus subtareas ven ese mismo worktree.
+- Al terminar, con éxito o no, se registra el diff (`git diff --stat` y un parche privado) y **no se aplica**. Tú decides: `a` o `/orch apply ID` lo aplica sobre tu árbol de trabajo (sin commit; si hay conflicto no se escribe nada y el worktree se conserva), y `x` o `/orch discard ID` lo descarta. Si no hubo cambios, el worktree se borra solo.
+- Fuera de git, la tarea escribe directamente y la tarjeta lo dice. `PI_ORCHESTRATOR_ISOLATE_WRITES=0` desactiva el aislamiento.
+- Sandbox (`PI_ORCHESTRATOR_YOLO_SANDBOX=on` por defecto):
+  - Codex YOLO usa `workspace-write`: solo escribe en su directorio y no tiene red.
+  - Claude ejecuta Bash dentro del sandbox de Claude Code, con `failIfUnavailable`, sin salida del sandbox y sin red. En modo restringido además tiene el directorio de la tarea protegido contra escritura: puede ejecutar `tsc` o tests, pero no escribir.
+  - Medido en vivo: Codex y Claude YOLO arreglaron un error en su worktree, tu árbol quedó intacto hasta aplicar, y la escritura en `$HOME` y la red quedaron bloqueadas.
+  - `off` restaura el acceso total. Que sea una elección explícita tuya.
+- `cwd` por tarea: el modelo puede indicarlo cuando nombras otro proyecto. Debe estar dentro del `cwd` de Pi o de `PI_ORCHESTRATOR_ALLOWED_ROOTS` (rutas absolutas separadas por `:`). Las subtareas heredan el directorio del padre.
+- Reintento automático: un fallo transitorio del proveedor (capacidad, sobrecarga, 5xx) o de red se reintenta **una vez** tras 5 s, solo si la tarea es de solo lectura, no lanzó subtareas y no fue cancelada. Los tokens de los dos intentos se suman. Medido: Codex devolvió `Selected model is at capacity` en una ejecución real de la matriz.
+
+### Permisos por intención, no por palabras clave
+
+Puedes pedir, por ejemplo, «/orch manda a agy flash 3.8 high a explorar el repo, no me pidas permisos» o expresarlo de otra manera. Pi interpreta el significado y pasa `permissionMode: "yolo"` solo con autorización explícita del operador para esa tarea. No existe una lista de frases ni un parser que active permisos al encontrar «yolo» en un prompt, archivo o respuesta del runtime. Sin autorización se conserva `restricted`; los comandos legacy start/run siguen restringidos.
+
+YOLO permite comandos y modificaciones sin confirmación, incluso fuera del workspace donde el motor lo permita. No equivale a aislamiento. La tarjeta muestra **YOLO autorizado (esta tarea)**; no se cambian defaults globales ni credenciales. Codex usa acceso completo sin aprobaciones; Claude habilita Bash/Write/Edit sin aprobaciones; Antigravity aprueba automáticamente solo opciones `allow_once` de la sesión activa. Una pregunta genuina no es una aprobación: no se inventan sus respuestas. Capacidades no implementadas siguen fallando, sin fallback silencioso.
+
+El modo participa en idempotencia y checkpoints. Las subtareas no heredan YOLO y no pueden elevar permisos por MCP, incluso si el padre está en YOLO; hace falta una nueva raíz autorizada por el operador. No se permite resume nativo de sesiones YOLO para evitar reutilizar permisos/estado elevados silenciosamente; autoriza una tarea nueva. Un restart histórico también empieza restringido. Cancelación, límites, presupuesto y verificación del cierre siguen vigentes; este modo **no corrige** un cleanup no confirmado.
+
+Cobertura local: políticas, propagación desde el tool, fixtures de los tres motores, ausencia de diálogos de aprobación en YOLO, rechazo de permisos persistentes/sesión ajena/IDs duplicados y persistencia estricta. No es una prueba nativa nueva ni garantía universal de interpretación semántica por cualquier modelo principal de Pi.
+
+## Seguridad y límites reales
+
+**"Solo lectura" no equivale a un aislamiento completo del sistema.**
+
+- Codex utiliza por defecto sandbox `read-only` y aprobaciones `never`; una tarea autorizada YOLO usa `danger-full-access` y `never`, sin sandbox de archivos. Solo las cuatro herramientas del servidor MCP propio se preautorizan mediante `tools.<nombre>.approval_mode = "approve"` y una allowlist explícita. En modo restringido no se cambian las aprobaciones de archivos/shell ni se finge que lanzar/cancelar workers sea una operación MCP de lectura. Se desactivan hooks y notificaciones heredados en este proceso y su hilo, además del multiagente nativo; no se modifica `~/.codex/config.toml`.
+- **Aislamiento MCP de Codex.** Los servidores MCP corren fuera del sandbox de Codex, así que un worker `read-only` que los heredara (p. ej. `node_repl`, `playwright` con herramientas preaprobadas, `supabase`) no sería de solo lectura. Antes de `thread/start` el adaptador obtiene los servidores definidos en la configuración efectiva (`config/read`, capas de usuario y proyecto) y los desactiva uno a uno; los de plugins y apps quedan fuera con `features.plugins=false` y `features.apps=false`. Todas las claves `mcp_servers.*` se envían en formato con punto: mezclar un objeto `mcp_servers` anidado con overrides con punto hace que Codex descarte parte de las desactivaciones (medido con codex-cli 0.166.0). Después de crear el hilo se verifica con `mcpServerStatus/list` por hilo que todo servidor distinto de `pi_orchestrator` esté `disabled`; si no, la tarea falla cerrada antes de enviar el turno. El `AGENTS.md` global de Codex sí se sigue cargando: Codex no permite excluirlo por hilo.
+- Esto corrige una interacción observada durante la validación: primero hubo intentos bloqueados antes de llegar al puente; con hooks desactivados Codex rechazó explícitamente la llamada por requerir aprobación. Tras añadir aprobación limitada al puente propio pasaron ambas direcciones. Los intentos fallidos se conservan como evidencia; no se cuentan como pruebas exitosas.
+- **YOLO requiere confirmación humana.** El modelo solo puede *proponer* `permissionMode=yolo`; `orchestrator_delegate` abre un diálogo de confirmación en la TUI de Pi con el motor y la tarea, y sin TUI o sin aceptación la tarea no se inicia. Así una inyección de prompt (texto del repositorio, salida de otro runtime) no basta para obtener ejecución sin aprobaciones.
+- Claude utiliza por defecto `--restricted`, solo herramientas de archivos `Read,Glob,Grep`, configuración MCP estricta y permisos no interactivos. Si el modo restringido le deniega una herramienta pero devuelve una respuesta, esta se publica con un aviso explícito de las herramientas denegadas en lugar de descartarse. En YOLO se omite `--restricted`, se habilitan también Bash/Write/Edit y se usa `--dangerously-skip-permissions` con `bypassPermissions`. En ambos modos permanecen desactivados hooks, plugins, multiagente nativo y configuración MCP heredada.
+- Se conservan las autenticaciones propias de los runtimes. Pi no intercambia sus tokens de proveedor con ellos.
+- El núcleo y los CLI siguen ejecutándose con tu usuario. Las configuraciones administradas y el comportamiento interno de los runtimes siguen aplicando. Las credenciales MCP no protegen frente a procesos hostiles con acceso equivalente al sistema de archivos o memoria del mismo usuario.
+- La comprobación de archivos de las pruebas cubre su directorio temporal, no todo el ordenador. No prueba que los CLI no escriban cachés, sesiones o logs propios.
+- MCP escucha solo en loopback, exige Bearer y rechaza cualquier `Origin` y un `Host` distinto de `127.0.0.1:<puerto>`. Revalida autoridad tras leer el cuerpo y en cada invocación. Desconectar un `wait` MCP elimina su espera, no cancela la tarea. Un segundo attach fallido no deja otro puerto escuchando; el cierre del transporte se intenta aun si falla el núcleo. No es un servicio remoto ni una frontera contra otros programas hostiles del usuario.
+- Hay persistencia opcional para inspección, no recuperación de ejecución. Hay reinicio explícito con nuevas identidades y Antigravity ACP experimental. No hay reintentos automáticos, adopción de procesos, adaptador Pi-hijo, worktrees ni integración FleetView. Las capacidades nuevas y su alcance están descritos al final. El consumo de los runtimes externos no se agrega a las estadísticas de costes de Pi.
+- El cierre normal y la recarga liberan recursos. Un SIGKILL/crash de Pi no permite ejecutar limpieza; la reconciliación posterior es de solo lectura, no adopta ni detiene procesos descubiertos en archivos. Los PIDs persistidos no son una identidad de proceso recuperable.
+- El panel y el widget utilizan componentes de Pi, no un renderer independiente. El texto de proveedores se limpia de secuencias de control terminal y se ajusta al ancho. Hay pruebas unitarias con Unicode, ventanas estrechas y paginación, además de interacción PTY automatizada. La revisión visual humana completa sigue pendiente.

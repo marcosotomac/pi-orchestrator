@@ -3,7 +3,7 @@
  * Not used for Antigravity: see its adapter. The coordinating model reads each
  * result once and synthesizes from it, so results should be short, lead with
  * the answer and carry checkable evidence. Measured in the fan-out benchmark
- * (scripts/bench-live.ts): see README "Rendimiento medido". Never ask for
+ * (scripts/bench-live.ts): see docs/evidence.md "Rendimiento medido". Never ask for
  * commands here: that pushed Antigravity into approval-gated command tools
  * (measured: restricted read-only tasks failed waiting for a permission).
  */
