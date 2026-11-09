@@ -57,7 +57,7 @@ test("a late child ends by its parent's soft deadline, so the parent still synth
       done.result!,
       /parent saw (cancelled|failed): child half-done/,
     );
-    assert.equal(core.usage().orchestration.deadlineClamps, 1);
+    assert.equal(core.usage().orchestration.boundedExpiries, 1);
   } finally {
     await core.close();
   }

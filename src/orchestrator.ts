@@ -93,8 +93,8 @@ interface Entry {
 
 /** Counters that make scheduling decisions measurable; exposed by `usage()` and `/orch usage`. */
 export interface OrchestrationMetrics {
-  /** Children whose deadline was shortened to end by their parent's soft deadline. */
-  deadlineClamps: number;
+  /** Children that expired at a deadline shortened to end by their parent's soft deadline. */
+  boundedExpiries: number;
   /** Nested waits shortened so the caller regains control by its own soft deadline. */
   waitClamps: number;
   /** Leaf children that waited for a slot instead of being rejected. */
@@ -169,8 +169,9 @@ export class Orchestrator {
   private closing = false;
   private persistenceFailure?: Error;
   private spendExhausted = false;
+  private admitting?: string;
   private metrics: OrchestrationMetrics = {
-    deadlineClamps: 0,
+    boundedExpiries: 0,
     waitClamps: 0,
     leafQueued: 0,
     nestedRejected: 0,
@@ -668,7 +669,13 @@ export class Orchestrator {
         this.leafQueue.push(view.id);
         this.metrics.leafQueued++;
       } else this.queue.push(engine, view.id);
-      this.pump();
+      // Dispatched within its own admission, it never actually waited.
+      this.admitting = view.id;
+      try {
+        this.pump();
+      } finally {
+        this.admitting = undefined;
+      }
     } else {
       const launch = entry.launch!;
       delete entry.launch;
@@ -776,17 +783,16 @@ export class Orchestrator {
         (parent.deadlineAt - parent.softAt) / 4,
       );
       const bound = Math.floor(parent.softAt - margin - now);
-      if (bound < timeoutMs) {
-        timeoutMs = Math.max(0, bound);
-        this.metrics.deadlineClamps++;
-      }
+      if (bound < timeoutMs) timeoutMs = Math.max(0, bound);
     }
     entry.deadlineAt = now + timeoutMs;
     entry.softAt = now + Math.floor(timeoutMs * SOFT_DEADLINE);
+    const bounded = timeoutMs < this.limits.timeoutMs;
     const timer = setTimeout(() => {
+      if (bounded) this.metrics.boundedExpiries++;
       this.abortTree(
         entry.view.id,
-        timeoutMs < this.limits.timeoutMs
+        bounded
           ? "Task deadline exceeded (bounded by the parent's deadline)"
           : "Task deadline exceeded",
       );
@@ -1390,7 +1396,7 @@ export class Orchestrator {
     transitionTask(entry.view, "running");
     this.activeCount++;
     if (root) this.activeRoots++;
-    if (entry.queuedAt !== undefined) {
+    if (entry.queuedAt !== undefined && entry.view.id !== this.admitting) {
       const waited = Date.now() - entry.queuedAt;
       this.metrics.queueDispatches++;
       this.metrics.queueWaitMsTotal += waited;
