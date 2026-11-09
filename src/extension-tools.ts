@@ -222,20 +222,15 @@ export function registerOrchestratorTools(
         ];
         if (!ids.length) throw new Error("Expected taskId or taskIds");
         const { core } = await get(ctx);
-        const deadline = Date.now() + (params.timeoutMs ?? 300_000);
         for (const id of ids) waiting.set(id, (waiting.get(id) ?? 0) + 1);
         try {
-          const views: TaskView[] = [];
           // Sequential waits share one deadline; settled tasks return immediately.
-          for (const id of ids)
-            views.push(
-              await core.wait(
-                null,
-                id,
-                Math.max(1, deadline - Date.now()),
-                signal,
-              ),
-            );
+          const views = await core.waitAll(
+            null,
+            ids,
+            params.timeoutMs ?? 300_000,
+            signal,
+          );
           const compact = views.map(once);
           return reply(
             params.taskIds ? views : views[0],

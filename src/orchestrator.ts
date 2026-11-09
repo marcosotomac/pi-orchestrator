@@ -103,6 +103,9 @@ export interface OrchestrationMetrics {
   queueDispatches: number;
   queueWaitMsTotal: number;
   queueWaitMsMax: number;
+  /** Wait calls (each one a model turn of the caller) and the tasks they covered. */
+  waitCalls: number;
+  waitedTasks: number;
 }
 
 export interface OrchestratorOptions {
@@ -160,6 +163,8 @@ export class Orchestrator {
     queueDispatches: 0,
     queueWaitMsTotal: 0,
     queueWaitMsMax: 0,
+    waitCalls: 0,
+    waitedTasks: 0,
   };
   /** Leaf children waiting for a slot; dispatched before roots. */
   private leafQueue: string[] = [];
@@ -1448,6 +1453,36 @@ export class Orchestrator {
       if (onAbort) signal?.removeEventListener("abort", onAbort);
     }
     return this.status(callerId, id);
+  }
+
+  /**
+   * One wait call for several tasks: sequential waits under one shared deadline, so
+   * a caller pays one turn for N tasks. Settled tasks return immediately.
+   */
+  async waitAll(
+    callerId: string | null,
+    ids: string[],
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<TaskView[]> {
+    const unique = [...new Set(ids)];
+    if (!unique.length || unique.length > 16)
+      throw new Error("Expected 1–16 task ids");
+    for (const id of unique) this.authorize(callerId, id);
+    this.metrics.waitCalls++;
+    this.metrics.waitedTasks += unique.length;
+    const deadline = Date.now() + timeoutMs;
+    const views: TaskView[] = [];
+    for (const id of unique)
+      views.push(
+        await this.wait(
+          callerId,
+          id,
+          Math.max(1, deadline - Date.now()),
+          signal,
+        ),
+      );
+    return views;
   }
 
   async close(): Promise<void> {
