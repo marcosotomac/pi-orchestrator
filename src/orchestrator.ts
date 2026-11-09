@@ -40,6 +40,10 @@ import {
 export const SOFT_DEADLINE = 0.85;
 export const ACTIVITY_PERSIST_MS = 5_000;
 export const RETRY_DELAY_MS = 5_000;
+/** After its soft deadline, a caller's wait returns this long before its hard deadline. */
+export const WAIT_DEADLINE_MARGIN_MS = 5_000;
+/** A deadline-bounded child settles at most this long before its parent's soft deadline. */
+export const CHILD_SETTLE_MARGIN_MS = 2_000;
 export const WRAP_UP_TEXT =
   "Time limit almost reached. Stop exploring now and give your final answer with what you already have. State clearly what you could not verify or finish.";
 import { MAX_RESULT, partialResult, publishedResult } from "./task-output.ts";
@@ -78,6 +82,17 @@ interface Entry {
   usageBaseline?: TaskUsage;
   /** A human granted a runtime permission: the attempt may have had side effects, so it is never repeated automatically. */
   humanApproved?: boolean;
+  /** Epoch ms of the hard deadline and of the soft (wrap-up) point of the running attempt. */
+  deadlineAt?: number;
+  softAt?: number;
+}
+
+/** Counters that make scheduling decisions measurable; exposed by `usage()` and `/orch usage`. */
+export interface OrchestrationMetrics {
+  /** Children whose deadline was shortened to end by their parent's soft deadline. */
+  deadlineClamps: number;
+  /** Nested waits shortened so the caller regains control by its own soft deadline. */
+  waitClamps: number;
 }
 
 export interface OrchestratorOptions {
@@ -127,6 +142,10 @@ export class Orchestrator {
   private endpoint?: string;
   private closing = false;
   private persistenceFailure?: Error;
+  private metrics: OrchestrationMetrics = {
+    deadlineClamps: 0,
+    waitClamps: 0,
+  };
   readonly cwd: string;
   readonly limits: {
     maxDepth: number;
@@ -662,11 +681,38 @@ export class Orchestrator {
    * steerable runtime is first asked to conclude; failure there never affects the task.
    */
   private armDeadlines(entry: Entry): () => void {
+    const now = Date.now();
+    let timeoutMs = this.limits.timeoutMs;
+    // A child must end by its parent's soft deadline: the parent then still has its
+    // wrap-up window to synthesize, instead of both being killed at the hard deadline.
+    const parent = entry.view.parentId
+      ? this.entries.get(entry.view.parentId)
+      : undefined;
+    if (parent?.softAt !== undefined && parent.deadlineAt !== undefined) {
+      // Leave room for the child's cleanup (SIGTERM, then SIGKILL after 1 s) so its
+      // settled result is visible when the parent's wait returns at the soft point.
+      const margin = Math.min(
+        CHILD_SETTLE_MARGIN_MS,
+        (parent.deadlineAt - parent.softAt) / 4,
+      );
+      const bound = Math.floor(parent.softAt - margin - now);
+      if (bound < timeoutMs) {
+        timeoutMs = Math.max(0, bound);
+        this.metrics.deadlineClamps++;
+      }
+    }
+    entry.deadlineAt = now + timeoutMs;
+    entry.softAt = now + Math.floor(timeoutMs * SOFT_DEADLINE);
     const timer = setTimeout(() => {
-      this.abortTree(entry.view.id, "Task deadline exceeded");
-    }, this.limits.timeoutMs);
+      this.abortTree(
+        entry.view.id,
+        timeoutMs < this.limits.timeoutMs
+          ? "Task deadline exceeded (bounded by the parent's deadline)"
+          : "Task deadline exceeded",
+      );
+    }, timeoutMs);
     const soft =
-      this.limits.timeoutMs >= 60_000
+      timeoutMs >= 60_000
         ? setTimeout(
             () => {
               if (
@@ -695,7 +741,7 @@ export class Orchestrator {
                   entry.steering = false;
                 });
             },
-            Math.floor(this.limits.timeoutMs * SOFT_DEADLINE),
+            Math.floor(timeoutMs * SOFT_DEADLINE),
           )
         : undefined;
     return () => {
@@ -1187,6 +1233,7 @@ export class Orchestrator {
       maxTokens: this.options.maxTokens,
       tasks: this.entries.size,
       queued: this.queue.size,
+      orchestration: { ...this.metrics },
       maxTasks: this.limits.maxTasks,
       maxConcurrent: this.limits.maxConcurrent,
       rootSlots:
@@ -1290,6 +1337,20 @@ export class Orchestrator {
       throw new Error(`Wait must be 1–${maxWait} ms`);
     signal?.throwIfAborted();
     const entry = this.entry(id);
+    // A runtime blocked in a tool call cannot obey its wrap-up steer: return by its
+    // soft deadline (or shortly before the hard one) so it can still answer.
+    const caller = callerId === null ? undefined : this.entries.get(callerId);
+    if (caller?.softAt !== undefined && caller.deadlineAt !== undefined) {
+      const now = Date.now();
+      const bound =
+        now < caller.softAt
+          ? caller.softAt - now
+          : caller.deadlineAt - now - WAIT_DEADLINE_MARGIN_MS;
+      if (bound < timeoutMs) {
+        timeoutMs = Math.max(1, bound);
+        this.metrics.waitClamps++;
+      }
+    }
     let timer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
     const boundary = new Promise<void>((resolve, reject) => {
