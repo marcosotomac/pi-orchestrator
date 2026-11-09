@@ -201,7 +201,7 @@ Las herramientas MCP son `delegate`, `status`, `wait` y `cancel`. La identidad d
 - **Actividad real:** los tres motores informan la herramienta y su objetivo ("leyendo AGENTS.md", "ejecutando `ls -la`", "editando a.ts"). El panel muestra los últimos 3 pasos con su antigüedad.
 - **Teclas en una sola línea abajo,** solo las que funcionan para la tarea seleccionada. Si no caben, se acortan o se quitan las menos importantes; `Esc cerrar` siempre queda.
 
-Con la cola justa por defecto, las raíces que exceden la capacidad esperan; las subtareas siguen rechazándose si no queda plaza (no pueden esperar detrás de sus ancestros). Un padre que necesite capacidad para hijos debe conservar una plaza disponible. La cadena de tres runtimes `Pi → Codex → Claude → Antigravity` requiere aumentar la profundidad predeterminada; esa cadena de tres runtimes no se ha probado.
+Con la cola justa por defecto, las raíces que exceden la capacidad esperan; una subtarea **hoja** (en la profundidad máxima, que no puede delegar) también espera, con prioridad sobre las raíces, siempre que alguna plaza ocupada pueda liberarse sin depender de ella; si todas las plazas pertenecen a sus ancestros se rechaza en vez de bloquearse. Las subtareas que aún pueden delegar se rechazan si no queda plaza. Cada subtarea termina antes del plazo blando de su padre (con 2 s de margen para su limpieza), y un `wait` anidado vuelve como tarde en ese plazo blando, para que el padre aún pueda sintetizar. `/orch usage` cuenta hojas en cola, rechazos, recortes de plazo y espera en cola. La cadena de tres runtimes `Pi → Codex → Claude → Antigravity` requiere aumentar la profundidad predeterminada; esa cadena de tres runtimes no se ha probado.
 
 ## Archivos
 

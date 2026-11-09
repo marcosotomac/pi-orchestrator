@@ -93,3 +93,76 @@ test("a nested wait returns by the caller's soft deadline even if the child outl
     await core.close();
   }
 });
+
+test("with the fair queue, a leaf child waits for a slot instead of being rejected", async () => {
+  const release = new Map<string, () => void>();
+  const order: string[] = [];
+  const child = async (ctx: RuntimeContext) => {
+    order.push(ctx.prompt);
+    await new Promise<void>((resolve) => release.set(ctx.prompt, resolve));
+    return `${ctx.prompt} done`;
+  };
+  const core = make({ queuePolicy: "fair", maxConcurrent: 2, child });
+  try {
+    const root = core.delegate(null, "codex", "root", "root");
+    const first = core.delegate(root.id, "claude", "first", "first");
+    const second = core.delegate(root.id, "claude", "second", "second");
+    assert.equal(first.state, "running");
+    assert.equal(second.state, "queued", "leaf queues at full capacity");
+    assert.equal(core.usage().queued, 1);
+    await delay(10);
+    release.get("first")!();
+    const done = await core.wait(root.id, second.id, 50).catch(() => null);
+    assert.equal(done?.state, "running", "dispatched when a slot frees");
+    release.get("second")!();
+    assert.equal((await core.wait(null, second.id, 1_000)).state, "completed");
+    assert.deepEqual(order, ["first", "second"]);
+    const metrics = core.usage().orchestration;
+    assert.equal(metrics.leafQueued, 1);
+    assert.equal(metrics.nestedRejected, 0);
+    assert.ok(metrics.queueWaitMsMax >= 10, `waited ${metrics.queueWaitMsMax}`);
+  } finally {
+    for (const fn of release.values()) fn();
+    await core.close();
+  }
+});
+
+test("a queued leaf is cancelled with its parent; children that could deadlock are rejected", async () => {
+  const core = make({ queuePolicy: "fair", maxConcurrent: 3, maxDepth: 3 });
+  try {
+    const root = core.delegate(null, "codex", "root", "root");
+    const other = core.delegate(null, "codex", "other", "other");
+    const middle = core.delegate(root.id, "claude", "middle", "middle");
+    assert.throws(
+      () => core.delegate(root.id, "claude", "sibling", "sibling"),
+      /nested work cannot queue/,
+      "depth 2 of 3 may delegate itself, so it never queues",
+    );
+    // `other` is not an ancestor: its slot can free, so the leaf may wait.
+    const leaf = core.delegate(middle.id, "codex", "leaf", "leaf");
+    assert.equal(leaf.state, "queued");
+    await core.cancel(null, root.id);
+    assert.equal(core.status(null, leaf.id).state, "cancelled");
+    assert.equal(core.status(null, leaf.id).runtimeProcess, undefined);
+    assert.equal(core.usage().queued, 0);
+    await core.cancel(null, other.id);
+    assert.equal(core.usage().orchestration.nestedRejected, 1);
+  } finally {
+    await core.close();
+  }
+});
+
+test("a leaf whose every occupied slot is an ancestor is rejected, not deadlocked", async () => {
+  const core = make({ queuePolicy: "fair", maxConcurrent: 2, maxDepth: 3 });
+  try {
+    const root = core.delegate(null, "codex", "root", "root");
+    const middle = core.delegate(root.id, "claude", "middle", "middle");
+    assert.throws(
+      () => core.delegate(middle.id, "codex", "leaf", "leaf"),
+      /no slot can free/,
+    );
+    assert.equal(core.usage().orchestration.nestedRejected, 1);
+  } finally {
+    await core.close();
+  }
+});

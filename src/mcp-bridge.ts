@@ -35,7 +35,7 @@ function sessionServer(
     "delegate",
     {
       description:
-        "Delegate a read-only task to another real runtime. Reuse requestKey for retries. Returns task id; use wait for the result. Parent executions count toward concurrency. Never delegate unless your assigned task permits it. Nested tasks are restricted; only the operator can authorize YOLO, and it is not inherited.",
+        "Delegate a read-only task to another real runtime. Reuse requestKey for retries. Returns task id; use wait for the result. Parent executions count toward concurrency; at full capacity a leaf task may wait queued (state queued), others are refused. Your child must finish before your own wrap-up point, so its deadline may be shorter than yours. Never delegate unless your assigned task permits it. Nested tasks are restricted; only the operator can authorize YOLO, and it is not inherited.",
       inputSchema: {
         permissionMode: z.enum(["restricted", "yolo"]).optional(),
         model: z.string().min(1).max(128).optional(),

@@ -85,6 +85,8 @@ interface Entry {
   /** Epoch ms of the hard deadline and of the soft (wrap-up) point of the running attempt. */
   deadlineAt?: number;
   softAt?: number;
+  /** Epoch ms when the task entered a queue; cleared at dispatch. */
+  queuedAt?: number;
 }
 
 /** Counters that make scheduling decisions measurable; exposed by `usage()` and `/orch usage`. */
@@ -93,6 +95,14 @@ export interface OrchestrationMetrics {
   deadlineClamps: number;
   /** Nested waits shortened so the caller regains control by its own soft deadline. */
   waitClamps: number;
+  /** Leaf children that waited for a slot instead of being rejected. */
+  leafQueued: number;
+  /** Children refused at full capacity (non-leaf, reject policy, or no slot could free). */
+  nestedRejected: number;
+  /** Tasks dispatched from a queue, and their total and longest wait there. */
+  queueDispatches: number;
+  queueWaitMsTotal: number;
+  queueWaitMsMax: number;
 }
 
 export interface OrchestratorOptions {
@@ -145,7 +155,14 @@ export class Orchestrator {
   private metrics: OrchestrationMetrics = {
     deadlineClamps: 0,
     waitClamps: 0,
+    leafQueued: 0,
+    nestedRejected: 0,
+    queueDispatches: 0,
+    queueWaitMsTotal: 0,
+    queueWaitMsMax: 0,
   };
+  /** Leaf children waiting for a slot; dispatched before roots. */
+  private leafQueue: string[] = [];
   readonly cwd: string;
   readonly limits: {
     maxDepth: number;
@@ -519,12 +536,30 @@ export class Orchestrator {
       throw new Error("Delegation depth limit reached");
     if (this.entries.size >= this.limits.maxTasks)
       throw new Error("Total task limit reached");
-    const queued = this.options.queuePolicy === "fair" && callerId === null;
-    if (!queued && this.activeCount >= this.limits.maxConcurrent)
-      throw new Error(
-        "Concurrency limit reached (parents count too; nested work cannot queue behind its waiting ancestors)",
-      );
-    if (queued && this.queue.size >= this.maxQueued)
+    const fair = this.options.queuePolicy === "fair";
+    const queuedRoot = fair && callerId === null;
+    let queuedLeaf = false;
+    if (!queuedRoot && this.activeCount >= this.limits.maxConcurrent) {
+      // A leaf cannot delegate, so it never holds a slot while waiting for another.
+      // It may queue only if some occupied slot can free without depending on it.
+      if (!fair || !parent || depth < this.limits.maxDepth) {
+        this.metrics.nestedRejected++;
+        throw new Error(
+          "Concurrency limit reached (parents count too; nested work cannot queue behind its waiting ancestors)",
+        );
+      }
+      if (!this.slotCanFree(parent.view.id)) {
+        this.metrics.nestedRejected++;
+        throw new Error(
+          "Concurrency limit reached: every occupied slot waits on this task's ancestors, so no slot can free",
+        );
+      }
+      if (this.leafQueue.length >= this.maxQueued)
+        throw new Error("Child queue limit reached");
+      queuedLeaf = true;
+    }
+    const queued = queuedRoot || queuedLeaf;
+    if (queuedRoot && this.queue.size >= this.maxQueued)
       throw new Error("Root queue limit reached");
     const token = randomBytes(32).toString("base64url");
     const view: TaskView = {
@@ -587,7 +622,11 @@ export class Orchestrator {
     this.emit("started", entry, undefined, false);
     // Install the entry and completion promise before executing a possibly synchronous adapter.
     if (queued) {
-      this.queue.push(engine, view.id);
+      entry.queuedAt = Date.now();
+      if (queuedLeaf) {
+        this.leafQueue.push(view.id);
+        this.metrics.leafQueued++;
+      } else this.queue.push(engine, view.id);
       this.pump();
     } else {
       const launch = entry.launch!;
@@ -1232,7 +1271,7 @@ export class Orchestrator {
       maxCostUsd: this.options.maxCostUsd,
       maxTokens: this.options.maxTokens,
       tasks: this.entries.size,
-      queued: this.queue.size,
+      queued: this.queue.size + this.leafQueue.length,
       orchestration: { ...this.metrics },
       maxTasks: this.limits.maxTasks,
       maxConcurrent: this.limits.maxConcurrent,
@@ -1243,7 +1282,35 @@ export class Orchestrator {
     };
   }
 
+  /**
+   * True when some running task is not an ancestor of any queued leaf (including
+   * one about to be queued under `parentId`): its slot frees without waiting on them.
+   */
+  private slotCanFree(parentId: string): boolean {
+    const blocked = new Set<string>();
+    const climb = (id: string | null | undefined) => {
+      while (id && !blocked.has(id)) {
+        blocked.add(id);
+        id = this.entries.get(id)?.view.parentId;
+      }
+    };
+    climb(parentId);
+    for (const id of this.leafQueue) climb(this.entries.get(id)?.view.parentId);
+    for (const { view, started } of this.entries.values())
+      if (started && !isTerminal(view) && !blocked.has(view.id)) return true;
+    return false;
+  }
+
   private pump(): void {
+    // Leaves first: their ancestors hold slots while waiting for them.
+    while (
+      !this.closing &&
+      this.activeCount < this.limits.maxConcurrent &&
+      this.leafQueue.length
+    ) {
+      const entry = this.entry(this.leafQueue.shift()!);
+      if (!isTerminal(entry.view)) this.dispatch(entry, false);
+    }
     while (
       !this.closing &&
       this.activeCount < this.limits.maxConcurrent &&
@@ -1252,19 +1319,32 @@ export class Orchestrator {
       const id = this.queue.shift();
       if (!id) return;
       const entry = this.entry(id);
-      if (isTerminal(entry.view)) continue;
-      entry.started = true;
-      transitionTask(entry.view, "running");
-      this.activeCount++;
-      this.activeRoots++;
-      // Dispatch is a second durable barrier, before granting credentials or invoking the runtime.
-      if (this.checkpoint()) this.identities.set(entry.tokenHash, id);
-      this.budget.setActive(this.activeCount);
-      this.emit("dispatched", entry, undefined, false);
-      const launch = entry.launch!;
-      delete entry.launch;
-      queueMicrotask(launch);
+      if (!isTerminal(entry.view)) this.dispatch(entry, true);
     }
+  }
+
+  private dispatch(entry: Entry, root: boolean): void {
+    entry.started = true;
+    transitionTask(entry.view, "running");
+    this.activeCount++;
+    if (root) this.activeRoots++;
+    if (entry.queuedAt !== undefined) {
+      const waited = Date.now() - entry.queuedAt;
+      this.metrics.queueDispatches++;
+      this.metrics.queueWaitMsTotal += waited;
+      this.metrics.queueWaitMsMax = Math.max(
+        this.metrics.queueWaitMsMax,
+        waited,
+      );
+      delete entry.queuedAt;
+    }
+    // Dispatch is a second durable barrier, before granting credentials or invoking the runtime.
+    if (this.checkpoint()) this.identities.set(entry.tokenHash, entry.view.id);
+    this.budget.setActive(this.activeCount);
+    this.emit("dispatched", entry, undefined, false);
+    const launch = entry.launch!;
+    delete entry.launch;
+    queueMicrotask(launch);
   }
 
   private redact(text: string, ownToken: string): string {
@@ -1283,6 +1363,7 @@ export class Orchestrator {
       delete entry.controls;
       if (!entry.started) {
         this.queue.remove(current);
+        this.leafQueue = this.leafQueue.filter((queued) => queued !== current);
         delete entry.launch;
         if (
           entry.resumeSessionId &&
