@@ -7,16 +7,20 @@ import type {
   EngineCatalog,
   RecoverySource,
   RuntimeAdapter,
+  RuntimeContext,
   RuntimeControls,
   TaskUsage,
   TaskView,
 } from "./types.ts";
 import { FairQueue } from "./fair-queue.ts";
 import { RuntimeBudget } from "./budget.ts";
-import { InteractionBroker, type InteractionHandler } from "./interactions.ts";
+import {
+  InteractionBroker,
+  type InteractionHandler,
+  type InteractionRequest,
+} from "./interactions.ts";
 import { validateSelection, type ModelSelection } from "./model-selection.ts";
 import { diagnoseFailure } from "./diagnostics.ts";
-import { compactFileLinks } from "./result-links.ts";
 import {
   applyChanges,
   collectChanges,
@@ -32,17 +36,15 @@ import {
   type PermissionMode,
 } from "./types.ts";
 
-/** Journal/schema bound for a published result. */
-export const MAX_RESULT = 20_000;
-export const PARTIAL_NOTE =
-  "\n\n[Resultado parcial: la tarea no terminó; este es el último texto que el runtime produjo antes de cortarse.]";
 /** Soft deadline: at this fraction of the task timeout, steerable runtimes are asked to answer now. */
 export const SOFT_DEADLINE = 0.85;
 export const ACTIVITY_PERSIST_MS = 5_000;
 export const RETRY_DELAY_MS = 5_000;
 export const WRAP_UP_TEXT =
   "Time limit almost reached. Stop exploring now and give your final answer with what you already have. State clearly what you could not verify or finish.";
-export const TRUNCATION_NOTE = `\n\n[Resultado truncado por el orquestador: superaba ${MAX_RESULT} caracteres; se publican los primeros. Pide al runtime un resumen o que escriba el detalle en un archivo.]`;
+import { MAX_RESULT, partialResult, publishedResult } from "./task-output.ts";
+import { assertSpendWithin, sessionSpend, type SessionSpend } from "./spend.ts";
+export { MAX_RESULT, PARTIAL_NOTE, TRUNCATION_NOTE } from "./task-output.ts";
 
 import { accumulateUsage, usageDelta, validUsage } from "./task-usage.ts";
 import { transitionTask } from "./task-state.ts";
@@ -622,11 +624,47 @@ export class Orchestrator {
     let output: string | undefined;
     let didFail = false;
     let failure: unknown;
+    const clearDeadlines = this.armDeadlines(entry);
+    try {
+      entry.controller.signal.throwIfAborted();
+      await this.prepareWorkspace(entry);
+      output = await this.runWithRetry(entry, () =>
+        this.options.adapters[entry.view.engine]!.run({
+          task: {
+            ...this.snapshot(entry.view),
+            cwd: entry.effectiveCwd ?? entry.view.cwd,
+          },
+          prompt,
+          resumeSessionId: entry.resumeSessionId,
+          signal: entry.controller.signal,
+          mcp: { url: this.endpoint!, token },
+          ...this.runtimeCallbacks(entry, token),
+        }),
+      );
+      if (typeof output !== "string" || !output.trim())
+        throw new Error("Runtime returned no result");
+      output = publishedResult(
+        this.redact(output, token),
+        [entry.effectiveCwd, entry.view.cwd],
+        (text) => this.saveFullResult(entry.view.id, text),
+      );
+    } catch (error) {
+      didFail = true;
+      failure = error;
+    } finally {
+      clearDeadlines();
+      await this.settle(entry, token, { output, didFail, failure });
+    }
+  }
+
+  /**
+   * Hard deadline aborts the tree. Killing at the deadline discards everything, so a
+   * steerable runtime is first asked to conclude; failure there never affects the task.
+   */
+  private armDeadlines(entry: Entry): () => void {
     const timer = setTimeout(() => {
       this.abortTree(entry.view.id, "Task deadline exceeded");
     }, this.limits.timeoutMs);
-    // Killing at the deadline discards everything; a steerable runtime is first
-    // asked to conclude. Best effort: failure here never affects the task.
     const soft =
       this.limits.timeoutMs >= 60_000
         ? setTimeout(
@@ -660,301 +698,282 @@ export class Orchestrator {
             Math.floor(this.limits.timeoutMs * SOFT_DEADLINE),
           )
         : undefined;
-    try {
-      entry.controller.signal.throwIfAborted();
-      if (
-        this.options.isolateWrites &&
-        entry.view.permissionMode === "yolo" &&
-        entry.view.parentId === null
-      ) {
-        const workspace = await isolate(entry.view.cwd);
-        if (workspace) {
-          entry.workspace = workspace;
-          entry.effectiveCwd = workspace.cwd;
-          entry.view.workspace = "worktree";
-          // Cancelled while git was checking out: nothing ran, nothing to review.
-          if (entry.controller.signal.aborted)
-            entry.controller.signal.throwIfAborted();
-        } else entry.view.workspace = "in-place";
-        this.emit("workspace", entry);
-      }
-      const runOnce = () =>
-        this.options.adapters[entry.view.engine]!.run({
-          task: {
-            ...this.snapshot(entry.view),
-            cwd: entry.effectiveCwd ?? entry.view.cwd,
-          },
-          prompt,
-          resumeSessionId: entry.resumeSessionId,
-          signal: entry.controller.signal,
-          mcp: { url: this.endpoint!, token },
-          usage: (usage) => {
-            if (isTerminal(entry.view) || !this.identities.has(entry.tokenHash))
-              return;
-            const raw = validUsage(usage);
-            if (!raw) return; // Malformed provider counters are ignored, never displayed.
-            entry.rawUsage = raw;
-            entry.view.usage = accumulateUsage(
-              usageDelta(raw, entry.usageBaseline),
-              entry.usageCarry,
-            );
-            // Display-only: the final settle checkpoint persists it without an fsync per update.
-            this.emit("usage", entry, undefined, false);
-          },
-          context: (used, size) => {
-            if (isTerminal(entry.view) || !this.identities.has(entry.tokenHash))
-              return;
-            if (
-              !Number.isSafeInteger(used) ||
-              !Number.isSafeInteger(size) ||
-              used < 0 ||
-              size < 1 ||
-              used > size * 4
-            )
-              return;
-            entry.view.context = {
-              used,
-              size,
-              peak: Math.max(used, entry.view.context?.peak ?? 0),
-            };
-            this.emit("context", entry, undefined, false);
-          },
-          partial: (text) => {
-            // Memory only: no event or checkpoint per streamed fragment.
-            if (
-              isTerminal(entry.view) ||
-              !this.identities.has(entry.tokenHash) ||
-              typeof text !== "string"
-            )
-              return;
-            entry.partial = text.slice(0, MAX_RESULT + 1);
-          },
-          modelState: (state) => {
-            if (
-              entry.controller.signal.aborted ||
-              !this.identities.has(entry.tokenHash)
-            )
-              return;
-            entry.view.modelState = structuredClone(state);
-            this.emit("model-selected", entry);
-          },
-          registerControls: (controls) => {
-            if (
-              !controls ||
-              (entry.view.state === "running" &&
-                this.identities.has(entry.tokenHash))
-            )
-              entry.controls = controls ? { ...controls } : undefined;
-          },
-          interact: async (request) => {
-            if (isTerminal(entry.view) || !this.identities.has(entry.tokenHash))
-              return undefined;
-            const answer = await this.interactions.request(
-              entry.view.id,
-              entry.view.engine,
-              {
-                ...request,
-                title: this.redact(request.title, token),
-                detail: this.redact(request.detail, token),
-                options: request.options.map((option) => ({
-                  ...option,
-                  label: this.redact(option.label, token),
-                })),
-              },
-              entry.controller.signal,
-            );
-            const granted =
-              this.identities.has(entry.tokenHash) &&
-              !entry.controller.signal.aborted
-                ? answer
-                : undefined;
-            // Restricted is not side-effect free when a person approves an operation (e.g. an Antigravity command).
-            if (granted && request.kind === "permission")
-              entry.humanApproved = true;
-            return granted;
-          },
-          session: (id) => {
-            if (entry.controller.signal.aborted || isTerminal(entry.view))
-              return;
-            if (entry.resumeSessionId && id !== entry.resumeSessionId)
-              throw new Error("Runtime resumed a different native session");
-            entry.view.runtimeSessionId = this.redact(id, token).slice(0, 256);
-            if (id === entry.view.runtimeSessionId) entry.nativeSessionId = id;
-            this.emit("session", entry);
-          },
-          process: (info) => {
-            if (isTerminal(entry.view)) return;
-            entry.view.runtimeProcess = { ...info };
-            this.emit(info.exitedAt ? "process-exited" : "process", entry);
-          },
-          activity: (detail) => {
-            if (entry.controller.signal.aborted || isTerminal(entry.view))
-              return;
-            entry.view.lastActivity = this.redact(detail, token).slice(0, 120);
-            entry.view.activityAt = new Date().toISOString();
-            const recent = entry.view.recentActivity ?? [];
-            if (recent.at(-1)?.text !== entry.view.lastActivity)
-              entry.view.recentActivity = [
-                ...recent,
-                { at: entry.view.activityAt, text: entry.view.lastActivity },
-              ].slice(-3);
-            // A durable rewrite (two fsyncs) per tool call is pure I/O (measured: 378
-            // activity events in one session). Persist at most every 5 s per task;
-            // the first one and the settle checkpoint are always written.
-            const now = Date.now();
-            const persist =
-              entry.activityPersistedAt === undefined ||
-              now - entry.activityPersistedAt >= ACTIVITY_PERSIST_MS;
-            if (persist) entry.activityPersistedAt = now;
-            this.emit("activity", entry, entry.view.lastActivity, persist);
-          },
-        });
-      for (let attempt = 1; ; attempt++) {
-        try {
-          output = await runOnce();
-          break;
-        } catch (error) {
-          if (attempt > 1 || !this.retryable(entry, error)) throw error;
-          if (entry.view.usage) entry.usageCarry = { ...entry.view.usage };
-          entry.view.lastActivity = `orchestrator: error transitorio (${diagnoseFailure(error).category}); reintento automático`;
-          entry.view.activityAt = new Date().toISOString();
-          this.emit("activity", entry, entry.view.lastActivity);
-          await new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(
-              resolve,
-              this.options.retryDelayMs ?? RETRY_DELAY_MS,
-            );
-            entry.controller.signal.addEventListener(
-              "abort",
-              () => {
-                clearTimeout(timer);
-                reject(entry.controller.signal.reason);
-              },
-              { once: true },
-            );
-          });
-        }
-      }
-      if (typeof output !== "string" || !output.trim())
-        throw new Error("Runtime returned no result");
-      output = this.redact(output, token);
-      // Before truncation: dead worktree links would otherwise consume the result budget.
-      output = compactFileLinks(output, [entry.effectiveCwd, entry.view.cwd]);
-      // Discarding a long answer throws away every token the runtime spent on it.
-      if (output.length > MAX_RESULT) {
-        // The full answer is kept in a private file; the published result points to it.
-        const path = this.saveFullResult(entry.view.id, output);
-        const note = path
-          ? `\n\n[Resultado truncado por el orquestador: superaba ${MAX_RESULT} caracteres. Texto completo (${output.length} caracteres) en ${path}]`
-          : TRUNCATION_NOTE;
-        output = output.slice(0, MAX_RESULT - note.length) + note;
-      }
-    } catch (error) {
-      didFail = true;
-      failure = error;
-    } finally {
+    return () => {
       clearTimeout(timer);
       clearTimeout(soft);
-      // A finished parent may not leave orphaned live work or valid delegation credentials.
-      this.identities.delete(entry.tokenHash);
-      this.interactions.cancelTask(entry.view.id);
-      delete entry.controls;
-      const children = [...(this.children.get(entry.view.id) ?? [])].map((id) =>
-        this.entry(id),
-      );
-      for (const child of children)
-        this.abortTree(child.view.id, "Parent execution ended");
-      await Promise.all(children.map((child) => child.done));
+    };
+  }
+
+  /** YOLO roots write into a private git worktree when the operator enabled isolation. */
+  private async prepareWorkspace(entry: Entry): Promise<void> {
+    if (
+      !this.options.isolateWrites ||
+      entry.view.permissionMode !== "yolo" ||
+      entry.view.parentId !== null
+    )
+      return;
+    const workspace = await isolate(entry.view.cwd);
+    if (workspace) {
+      entry.workspace = workspace;
+      entry.effectiveCwd = workspace.cwd;
+      entry.view.workspace = "worktree";
+      // Cancelled while git was checking out: nothing ran, nothing to review.
+      if (entry.controller.signal.aborted)
+        entry.controller.signal.throwIfAborted();
+    } else entry.view.workspace = "in-place";
+    this.emit("workspace", entry);
+  }
+
+  /** At most one automatic retry, only when `retryable` proves it cannot duplicate side effects. */
+  private async runWithRetry(
+    entry: Entry,
+    runOnce: () => Promise<string>,
+  ): Promise<string> {
+    for (let attempt = 1; ; attempt++) {
       try {
-        this.budget.assertAvailable();
-      } catch {
-        /* Budget expiry aborts live work before terminal acknowledgement. */
+        return await runOnce();
+      } catch (error) {
+        if (attempt > 1 || !this.retryable(entry, error)) throw error;
+        if (entry.view.usage) entry.usageCarry = { ...entry.view.usage };
+        entry.view.lastActivity = `orchestrator: error transitorio (${diagnoseFailure(error).category}); reintento automático`;
+        entry.view.activityAt = new Date().toISOString();
+        this.emit("activity", entry, entry.view.lastActivity);
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(
+            resolve,
+            this.options.retryDelayMs ?? RETRY_DELAY_MS,
+          );
+          entry.controller.signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              reject(entry.controller.signal.reason);
+            },
+            { once: true },
+          );
+        });
       }
-      if (entry.workspace) {
-        // Whatever the outcome, what was written is recorded for review, never applied here.
-        try {
-          const changes = await collectChanges(entry.workspace);
-          if (changes.state === "none")
-            await discardWorkspace(
-              entry.workspace.repoRoot,
-              entry.workspace.path,
-              entry.workspace.patchDirectory + "/changes.patch",
-            );
-          entry.view.changes = changes;
-        } catch (error) {
-          entry.view.changes = {
-            state: "pending",
-            files: 0,
-            insertions: 0,
-            deletions: 0,
-            summary: "",
-            repo: entry.workspace.repoRoot,
-            worktree: entry.workspace.path,
-            error: this.redact(errorText(error), token).slice(0, 500),
-          };
-        }
-      }
-      entry.cleanupFailed =
-        failure instanceof RuntimeCleanupError ||
-        Boolean(
-          entry.view.runtimeProcess && !entry.view.runtimeProcess.exitedAt,
-        ) ||
-        children.some((child) => child.cleanupFailed);
-      if (entry.cleanupFailed) {
-        transitionTask(entry.view, "failed");
-        entry.view.error =
-          "Runtime cleanup could not be confirmed; no cancellation or process-group cleanup was acknowledged";
-        entry.view.diagnostic = diagnoseFailure(
-          new RuntimeCleanupError(undefined),
-        );
-      } else if (entry.controller.signal.aborted) {
-        transitionTask(entry.view, "cancelled");
-        entry.view.error = errorText(entry.controller.signal.reason);
-      } else if (didFail) {
-        transitionTask(entry.view, "failed");
-        entry.view.error = this.redact(errorText(failure), token).slice(
-          0,
-          8_000,
-        );
-        entry.view.diagnostic = diagnoseFailure(failure);
-      } else {
-        transitionTask(entry.view, "completed");
-        entry.view.result = output!;
-      }
-      if (entry.view.state !== "completed" && entry.partial?.trim()) {
-        let partial = compactFileLinks(this.redact(entry.partial, token), [
-          entry.effectiveCwd,
-          entry.view.cwd,
-        ]);
-        if (partial.length > MAX_RESULT - PARTIAL_NOTE.length)
-          partial =
-            partial.slice(
-              0,
-              MAX_RESULT - PARTIAL_NOTE.length - TRUNCATION_NOTE.length,
-            ) + TRUNCATION_NOTE;
-        entry.view.partialResult = partial + PARTIAL_NOTE;
-      }
-      delete entry.partial;
-      entry.view.endedAt = new Date().toISOString();
-      this.activeCount--;
-      if (entry.view.parentId === null) this.activeRoots--;
-      this.budget.setActive(this.activeCount);
-      if (!this.checkpoint() && entry.view.state === "completed") {
-        // Native success without a committed final checkpoint is not durable task success.
-        transitionTask(entry.view, "failed", "checkpoint-failed");
-        delete entry.view.result;
-        entry.view.error = this.persistenceFailure!.message;
-      }
-      this.emit("settled", entry, undefined, false);
-      if (
-        !entry.cleanupFailed &&
-        entry.resumeSessionId &&
-        this.sessionLeases.get(entry.resumeSessionId) === entry.view.id
-      )
-        this.sessionLeases.delete(entry.resumeSessionId);
-      entry.settle();
-      this.pump();
     }
+  }
+
+  /** Adapter callbacks; each one ignores reports from a revoked or settled attempt. */
+  private runtimeCallbacks(entry: Entry, token: string) {
+    const live = () =>
+      !isTerminal(entry.view) && this.identities.has(entry.tokenHash);
+    return {
+      usage: (usage: TaskUsage) => {
+        if (!live()) return;
+        const raw = validUsage(usage);
+        if (!raw) return; // Malformed provider counters are ignored, never displayed.
+        entry.rawUsage = raw;
+        entry.view.usage = accumulateUsage(
+          usageDelta(raw, entry.usageBaseline),
+          entry.usageCarry,
+        );
+        // Display-only: the final settle checkpoint persists it without an fsync per update.
+        this.emit("usage", entry, undefined, false);
+      },
+      context: (used: number, size: number) => {
+        if (!live()) return;
+        if (
+          !Number.isSafeInteger(used) ||
+          !Number.isSafeInteger(size) ||
+          used < 0 ||
+          size < 1 ||
+          used > size * 4
+        )
+          return;
+        entry.view.context = {
+          used,
+          size,
+          peak: Math.max(used, entry.view.context?.peak ?? 0),
+        };
+        this.emit("context", entry, undefined, false);
+      },
+      partial: (text: string) => {
+        // Memory only: no event or checkpoint per streamed fragment.
+        if (!live() || typeof text !== "string") return;
+        entry.partial = text.slice(0, MAX_RESULT + 1);
+      },
+      modelState: (state: NonNullable<TaskView["modelState"]>) => {
+        if (
+          entry.controller.signal.aborted ||
+          !this.identities.has(entry.tokenHash)
+        )
+          return;
+        entry.view.modelState = structuredClone(state);
+        this.emit("model-selected", entry);
+      },
+      registerControls: (controls: RuntimeControls | undefined) => {
+        if (
+          !controls ||
+          (entry.view.state === "running" &&
+            this.identities.has(entry.tokenHash))
+        )
+          entry.controls = controls ? { ...controls } : undefined;
+      },
+      interact: async (request: InteractionRequest) => {
+        if (!live()) return undefined;
+        const answer = await this.interactions.request(
+          entry.view.id,
+          entry.view.engine,
+          {
+            ...request,
+            title: this.redact(request.title, token),
+            detail: this.redact(request.detail, token),
+            options: request.options.map((option) => ({
+              ...option,
+              label: this.redact(option.label, token),
+            })),
+          },
+          entry.controller.signal,
+        );
+        const granted =
+          this.identities.has(entry.tokenHash) &&
+          !entry.controller.signal.aborted
+            ? answer
+            : undefined;
+        // Restricted is not side-effect free when a person approves an operation (e.g. an Antigravity command).
+        if (granted && request.kind === "permission")
+          entry.humanApproved = true;
+        return granted;
+      },
+      session: (id: string) => {
+        if (entry.controller.signal.aborted || isTerminal(entry.view)) return;
+        if (entry.resumeSessionId && id !== entry.resumeSessionId)
+          throw new Error("Runtime resumed a different native session");
+        entry.view.runtimeSessionId = this.redact(id, token).slice(0, 256);
+        if (id === entry.view.runtimeSessionId) entry.nativeSessionId = id;
+        this.emit("session", entry);
+      },
+      process: (info: NonNullable<TaskView["runtimeProcess"]>) => {
+        if (isTerminal(entry.view)) return;
+        entry.view.runtimeProcess = { ...info };
+        this.emit(info.exitedAt ? "process-exited" : "process", entry);
+      },
+      activity: (detail: string) => {
+        if (entry.controller.signal.aborted || isTerminal(entry.view)) return;
+        entry.view.lastActivity = this.redact(detail, token).slice(0, 120);
+        entry.view.activityAt = new Date().toISOString();
+        const recent = entry.view.recentActivity ?? [];
+        if (recent.at(-1)?.text !== entry.view.lastActivity)
+          entry.view.recentActivity = [
+            ...recent,
+            { at: entry.view.activityAt, text: entry.view.lastActivity },
+          ].slice(-3);
+        // A durable rewrite (two fsyncs) per tool call is pure I/O (measured: 378
+        // activity events in one session). Persist at most every 5 s per task;
+        // the first one and the settle checkpoint are always written.
+        const now = Date.now();
+        const persist =
+          entry.activityPersistedAt === undefined ||
+          now - entry.activityPersistedAt >= ACTIVITY_PERSIST_MS;
+        if (persist) entry.activityPersistedAt = now;
+        this.emit("activity", entry, entry.view.lastActivity, persist);
+      },
+    } satisfies Partial<RuntimeContext>;
+  }
+
+  /** Whatever the outcome, what a worktree task wrote is recorded for review, never applied here. */
+  private async recordChanges(entry: Entry, token: string): Promise<void> {
+    if (!entry.workspace) return;
+    try {
+      const changes = await collectChanges(entry.workspace);
+      if (changes.state === "none")
+        await discardWorkspace(
+          entry.workspace.repoRoot,
+          entry.workspace.path,
+          entry.workspace.patchDirectory + "/changes.patch",
+        );
+      entry.view.changes = changes;
+    } catch (error) {
+      entry.view.changes = {
+        state: "pending",
+        files: 0,
+        insertions: 0,
+        deletions: 0,
+        summary: "",
+        repo: entry.workspace.repoRoot,
+        worktree: entry.workspace.path,
+        error: this.redact(errorText(error), token).slice(0, 500),
+      };
+    }
+  }
+
+  /** Revokes the attempt, drains its subtree, then records exactly one terminal state. */
+  private async settle(
+    entry: Entry,
+    token: string,
+    outcome: { output?: string; didFail: boolean; failure: unknown },
+  ): Promise<void> {
+    // A finished parent may not leave orphaned live work or valid delegation credentials.
+    this.identities.delete(entry.tokenHash);
+    this.interactions.cancelTask(entry.view.id);
+    delete entry.controls;
+    const children = [...(this.children.get(entry.view.id) ?? [])].map((id) =>
+      this.entry(id),
+    );
+    for (const child of children)
+      this.abortTree(child.view.id, "Parent execution ended");
+    await Promise.all(children.map((child) => child.done));
+    try {
+      this.budget.assertAvailable();
+    } catch {
+      /* Budget expiry aborts live work before terminal acknowledgement. */
+    }
+    await this.recordChanges(entry, token);
+    entry.cleanupFailed =
+      outcome.failure instanceof RuntimeCleanupError ||
+      Boolean(
+        entry.view.runtimeProcess && !entry.view.runtimeProcess.exitedAt,
+      ) ||
+      children.some((child) => child.cleanupFailed);
+    if (entry.cleanupFailed) {
+      transitionTask(entry.view, "failed");
+      entry.view.error =
+        "Runtime cleanup could not be confirmed; no cancellation or process-group cleanup was acknowledged";
+      entry.view.diagnostic = diagnoseFailure(
+        new RuntimeCleanupError(undefined),
+      );
+    } else if (entry.controller.signal.aborted) {
+      transitionTask(entry.view, "cancelled");
+      entry.view.error = errorText(entry.controller.signal.reason);
+    } else if (outcome.didFail) {
+      transitionTask(entry.view, "failed");
+      entry.view.error = this.redact(errorText(outcome.failure), token).slice(
+        0,
+        8_000,
+      );
+      entry.view.diagnostic = diagnoseFailure(outcome.failure);
+    } else {
+      transitionTask(entry.view, "completed");
+      entry.view.result = outcome.output!;
+    }
+    if (entry.view.state !== "completed" && entry.partial?.trim())
+      entry.view.partialResult = partialResult(
+        this.redact(entry.partial, token),
+        [entry.effectiveCwd, entry.view.cwd],
+      );
+    delete entry.partial;
+    entry.view.endedAt = new Date().toISOString();
+    this.activeCount--;
+    if (entry.view.parentId === null) this.activeRoots--;
+    this.budget.setActive(this.activeCount);
+    if (!this.checkpoint() && entry.view.state === "completed") {
+      // Native success without a committed final checkpoint is not durable task success.
+      transitionTask(entry.view, "failed", "checkpoint-failed");
+      delete entry.view.result;
+      entry.view.error = this.persistenceFailure!.message;
+    }
+    this.emit("settled", entry, undefined, false);
+    if (
+      !entry.cleanupFailed &&
+      entry.resumeSessionId &&
+      this.sessionLeases.get(entry.resumeSessionId) === entry.view.id
+    )
+      this.sessionLeases.delete(entry.resumeSessionId);
+    entry.settle();
+    this.pump();
   }
 
   /** Operator-only fresh attempt of a settled root task with the same engine, prompt, selection and permission mode. */
@@ -1119,62 +1138,12 @@ export class Orchestrator {
   }
 
   /** Provider-reported spend so far: tokens from every engine, dollars only where reported (Claude). */
-  spend(): {
-    tokens: number;
-    costUsd: number;
-    costEngines: string[];
-    estimatedTokens: number;
-    estimatedEngines: string[];
-  } {
-    let tokens = 0,
-      costUsd = 0,
-      estimatedTokens = 0;
-    const costEngines = new Set<string>(),
-      estimatedEngines = new Set<string>();
-    for (const { view } of this.entries.values()) {
-      if (!view.usage) {
-        // Antigravity reports no token usage, only context occupancy. Its peak is a
-        // lower bound of the input tokens billed (every model call resends at least
-        // that much), so the token guard is no longer blind to those tasks.
-        const peak = view.context?.peak ?? view.context?.used;
-        if (peak !== undefined) {
-          tokens += peak;
-          estimatedTokens += peak;
-          estimatedEngines.add(view.engine);
-        }
-        continue;
-      }
-      tokens += view.usage.inputTokens + view.usage.outputTokens;
-      if (view.usage.costUsd !== undefined) {
-        costUsd += view.usage.costUsd;
-        costEngines.add(view.engine);
-      }
-    }
-    return {
-      tokens,
-      costUsd,
-      costEngines: [...costEngines],
-      estimatedTokens,
-      estimatedEngines: [...estimatedEngines],
-    };
+  spend(): SessionSpend {
+    return sessionSpend([...this.entries.values()].map(({ view }) => view));
   }
 
   private assertSpendAvailable(): void {
-    const { tokens, costUsd } = this.spend();
-    if (
-      this.options.maxTokens !== undefined &&
-      tokens >= this.options.maxTokens
-    )
-      throw new Error(
-        `Session token limit reached (${tokens} ≥ ${this.options.maxTokens}, PI_ORCHESTRATOR_MAX_TOKENS); new work is refused`,
-      );
-    if (
-      this.options.maxCostUsd !== undefined &&
-      costUsd >= this.options.maxCostUsd
-    )
-      throw new Error(
-        `Session cost limit reached ($${costUsd.toFixed(2)} ≥ $${this.options.maxCostUsd}, PI_ORCHESTRATOR_MAX_COST_USD); new work is refused`,
-      );
+    assertSpendWithin(this.spend(), this.options);
   }
 
   /** Real model listings, one short-lived probe per engine (never a prompt); failures are reported per engine. */
