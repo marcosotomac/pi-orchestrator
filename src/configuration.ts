@@ -32,6 +32,7 @@ export function runtimeConfiguration(
     PI_ORCHESTRATOR_MAX_RUNTIME_MS: "maxRuntimeMs",
     PI_ORCHESTRATOR_TASK_TIMEOUT_MS: "timeoutMs",
     PI_ORCHESTRATOR_MAX_QUEUED: "maxQueued",
+    PI_ORCHESTRATOR_MAX_QUEUE_WAIT_MS: "maxQueueWaitMs",
     PI_ORCHESTRATOR_RESERVED_CHILD_SLOTS: "reservedChildSlots",
     PI_ORCHESTRATOR_INTERACTION_TIMEOUT_MS: "interactionTimeoutMs",
   } as const;
@@ -122,6 +123,11 @@ export const settingsRegistry: readonly {
     name: "PI_ORCHESTRATOR_MAX_QUEUED",
     fallback: "32",
     description: "raíces en cola",
+  },
+  {
+    name: "PI_ORCHESTRATOR_MAX_QUEUE_WAIT_MS",
+    fallback: "sin límite",
+    description: "espera máxima en cola antes de cancelar sin lanzar",
   },
   {
     name: "PI_ORCHESTRATOR_RESERVED_CHILD_SLOTS",

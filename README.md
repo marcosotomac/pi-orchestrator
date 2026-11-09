@@ -177,7 +177,7 @@ Las herramientas MCP son `delegate`, `status`, `wait` y `cancel`. La identidad d
 | --- | --- |
 | Profundidad | 2 runtimes por debajo de Pi |
 | Concurrencia | 4 en la extensión (`PI_ORCHESTRATOR_MAX_CONCURRENT`), incluyendo padres que esperan; con la cola justa una plaza queda reservada para subtareas, así que corren 3 raíces a la vez. El núcleo como librería mantiene 3 |
-| Cola de raíces | `fair` por defecto en la extensión (`PI_ORCHESTRATOR_QUEUE=reject` vuelve al rechazo); las tareas que exceden la capacidad esperan en cola |
+| Cola de raíces | `fair` por defecto en la extensión (`PI_ORCHESTRATOR_QUEUE=reject` vuelve al rechazo); las tareas que exceden la capacidad esperan en cola, sin límite de tiempo salvo `PI_ORCHESTRATOR_MAX_QUEUE_WAIT_MS`, que cancela sin lanzar las que esperan más |
 | Tareas por sesión del núcleo | 32, incluyendo terminadas (`PI_ORCHESTRATOR_MAX_TASKS`); es un freno contra delegación desbocada |
 | Plazo por intento | 15 minutos (`PI_ORCHESTRATOR_TASK_TIMEOUT_MS`); al 85 % se pide a Codex (vía steer) que cierre y responda ya; al vencer se cancela el árbol |
 | Resultado parcial | si una tarea falla o se cancela (plazo, turnos, presupuesto), su último texto se publica como `partialResult` marcado como parcial; nunca cuenta como completada |

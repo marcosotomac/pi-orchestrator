@@ -215,3 +215,30 @@ test("default spend enforcement only refuses new work; running work continues", 
     await core.close();
   }
 });
+
+test("a task queued longer than maxQueueWaitMs is cancelled without ever launching", async () => {
+  const launched: string[] = [];
+  const core = make({
+    queuePolicy: "fair",
+    maxConcurrent: 2,
+    maxQueueWaitMs: 50,
+    run: async (ctx) => {
+      launched.push(ctx.prompt);
+      return blocked(ctx);
+    },
+  });
+  try {
+    core.delegate(null, "codex", "busy", "busy");
+    const late = core.delegate(null, "codex", "late", "late");
+    assert.equal(late.state, "queued");
+    const settled = await core.wait(null, late.id, 2_000);
+    assert.equal(settled.state, "cancelled");
+    assert.match(settled.error!, /queue wait limit/i);
+    assert.deepEqual(launched, ["busy"]);
+    assert.equal(core.usage().queued, 0);
+    assert.equal(core.usage().orchestration.queueExpired, 1);
+    assert.throws(() => make({ maxQueueWaitMs: 0 }), /maxQueueWaitMs/);
+  } finally {
+    await core.close();
+  }
+});

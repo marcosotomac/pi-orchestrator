@@ -87,6 +87,8 @@ interface Entry {
   softAt?: number;
   /** Epoch ms when the task entered a queue; cleared at dispatch. */
   queuedAt?: number;
+  /** Cancels the task if it is still queued after maxQueueWaitMs. */
+  queueTimer?: NodeJS.Timeout;
 }
 
 /** Counters that make scheduling decisions measurable; exposed by `usage()` and `/orch usage`. */
@@ -111,6 +113,8 @@ export interface OrchestrationMetrics {
   earlyFailureWakes: number;
   /** Times running work was cancelled because a spend cap was crossed ("abort" enforcement). */
   spendAborts: number;
+  /** Queued tasks cancelled by maxQueueWaitMs before launching. */
+  queueExpired: number;
 }
 
 export interface OrchestratorOptions {
@@ -139,6 +143,8 @@ export interface OrchestratorOptions {
   maxTokens?: number;
   /** "admission" (default): a reached cap refuses new work. "abort": it also cancels running work, keeping partials. */
   spendEnforcement?: "admission" | "abort";
+  /** A queued task still waiting after this long is cancelled without launching. Unset: no limit. */
+  maxQueueWaitMs?: number;
   /** Delay before the single automatic retry of a transient/network failure. */
   retryDelayMs?: number;
   /** Extra directories (besides cwd) an operator task may run in; subdirectories included. */
@@ -176,6 +182,7 @@ export class Orchestrator {
     batchWakes: 0,
     earlyFailureWakes: 0,
     spendAborts: 0,
+    queueExpired: 0,
   };
   /** Leaf children waiting for a slot; dispatched before roots. */
   private leafQueue: string[] = [];
@@ -221,6 +228,13 @@ export class Orchestrator {
       reserved >= this.limits.maxConcurrent
     )
       throw new Error("Invalid queue limits");
+    if (
+      options.maxQueueWaitMs !== undefined &&
+      (!Number.isSafeInteger(options.maxQueueWaitMs) ||
+        options.maxQueueWaitMs < 1 ||
+        options.maxQueueWaitMs > 2_147_483_647)
+    )
+      throw new Error("Invalid limit: maxQueueWaitMs");
     this.rootSlots = this.limits.maxConcurrent - reserved;
     for (const [key, value] of Object.entries(this.limits)) {
       if (
@@ -639,6 +653,17 @@ export class Orchestrator {
     // Install the entry and completion promise before executing a possibly synchronous adapter.
     if (queued) {
       entry.queuedAt = Date.now();
+      if (this.options.maxQueueWaitMs !== undefined) {
+        entry.queueTimer = setTimeout(() => {
+          if (entry.started || isTerminal(entry.view)) return;
+          this.metrics.queueExpired++;
+          this.abortTree(
+            entry.view.id,
+            `Queue wait limit reached (${this.options.maxQueueWaitMs} ms, PI_ORCHESTRATOR_MAX_QUEUE_WAIT_MS); never launched`,
+          );
+        }, this.options.maxQueueWaitMs);
+        entry.queueTimer.unref?.();
+      }
       if (queuedLeaf) {
         this.leafQueue.push(view.id);
         this.metrics.leafQueued++;
@@ -1360,6 +1385,7 @@ export class Orchestrator {
   }
 
   private dispatch(entry: Entry, root: boolean): void {
+    clearTimeout(entry.queueTimer);
     entry.started = true;
     transitionTask(entry.view, "running");
     this.activeCount++;
@@ -1398,6 +1424,7 @@ export class Orchestrator {
       this.identities.delete(entry.tokenHash);
       delete entry.controls;
       if (!entry.started) {
+        clearTimeout(entry.queueTimer);
         this.queue.remove(current);
         this.leafQueue = this.leafQueue.filter((queued) => queued !== current);
         delete entry.launch;
