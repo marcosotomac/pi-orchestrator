@@ -128,7 +128,7 @@ Suite secuencial histórica: **166/166**; evidencia `artifacts/interactive-sched
   - Antigravity abre una sesión breve para leer su catálogo.
   - Claude muestra sus alias, que se resuelven por cuenta; el modelo resuelto queda registrado en cada tarea.
   - Medido: los tres motores responden en 4,3 s. En una prueba real, el modelo principal resolvió "argon" como `gemini-4-argon` consultando el catálogo, en lugar de adivinar.
-- `PI_ORCHESTRATOR_MAX_TOKENS` y `PI_ORCHESTRATOR_MAX_COST_USD` limitan el gasto de la sesión según lo que informa cada motor (solo Claude informa dólares). Al alcanzarse se rechaza trabajo nuevo, pero no se mata el que está en curso. `/orch usage` muestra el consumo frente al tope.
+- `PI_ORCHESTRATOR_MAX_TOKENS` y `PI_ORCHESTRATOR_MAX_COST_USD` limitan el gasto de la sesión según lo que informa cada motor (solo Claude informa dólares). Al alcanzarse se rechaza trabajo nuevo, pero no se mata el que está en curso, salvo con `PI_ORCHESTRATOR_SPEND_ENFORCEMENT=abort`: entonces el primer cruce del tope cancela todo el trabajo vivo y conserva sus resultados parciales. Como solo Claude informa dólares, en ese modo el tope en USD sigue sin ver el gasto de Codex y Antigravity. `/orch usage` muestra el consumo frente al tope.
 
 ## Historial por defecto
 

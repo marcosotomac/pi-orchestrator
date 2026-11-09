@@ -80,6 +80,15 @@ export function runtimeConfiguration(
       );
     options.isolateWrites = env.PI_ORCHESTRATOR_ISOLATE_WRITES === "1";
   }
+  if (env.PI_ORCHESTRATOR_SPEND_ENFORCEMENT !== undefined) {
+    if (!["admission", "abort"].includes(env.PI_ORCHESTRATOR_SPEND_ENFORCEMENT))
+      throw new Error(
+        "Invalid PI_ORCHESTRATOR_SPEND_ENFORCEMENT (expected admission or abort)",
+      );
+    options.spendEnforcement = env.PI_ORCHESTRATOR_SPEND_ENFORCEMENT as
+      | "admission"
+      | "abort";
+  }
   if (env.PI_ORCHESTRATOR_QUEUE !== undefined) {
     if (!["reject", "fair"].includes(env.PI_ORCHESTRATOR_QUEUE))
       throw new Error("Invalid orchestrator queue policy");
@@ -148,6 +157,12 @@ export const settingsRegistry: readonly {
     name: "PI_ORCHESTRATOR_MAX_COST_USD",
     fallback: "sin límite",
     description: "tope en USD de la sesión (solo Claude informa dólares)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_SPEND_ENFORCEMENT",
+    fallback: "admission",
+    description:
+      "al llegar al tope: admission (rechaza nuevo) | abort (cancela lo vivo)",
   },
   {
     name: "PI_ORCHESTRATOR_ALLOWED_ROOTS",

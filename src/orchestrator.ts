@@ -109,6 +109,8 @@ export interface OrchestrationMetrics {
   /** Main-model wake-ups by the host: finished batches, and early ones for a failure. */
   batchWakes: number;
   earlyFailureWakes: number;
+  /** Times running work was cancelled because a spend cap was crossed ("abort" enforcement). */
+  spendAborts: number;
 }
 
 export interface OrchestratorOptions {
@@ -135,6 +137,8 @@ export interface OrchestratorOptions {
   /** Spend guards over provider-reported usage: once reached, new work is refused (running work continues). */
   maxCostUsd?: number;
   maxTokens?: number;
+  /** "admission" (default): a reached cap refuses new work. "abort": it also cancels running work, keeping partials. */
+  spendEnforcement?: "admission" | "abort";
   /** Delay before the single automatic retry of a transient/network failure. */
   retryDelayMs?: number;
   /** Extra directories (besides cwd) an operator task may run in; subdirectories included. */
@@ -158,6 +162,7 @@ export class Orchestrator {
   private endpoint?: string;
   private closing = false;
   private persistenceFailure?: Error;
+  private spendExhausted = false;
   private metrics: OrchestrationMetrics = {
     deadlineClamps: 0,
     waitClamps: 0,
@@ -170,6 +175,7 @@ export class Orchestrator {
     waitedTasks: 0,
     batchWakes: 0,
     earlyFailureWakes: 0,
+    spendAborts: 0,
   };
   /** Leaf children waiting for a slot; dispatched before roots. */
   private leafQueue: string[] = [];
@@ -867,6 +873,7 @@ export class Orchestrator {
         );
         // Display-only: the final settle checkpoint persists it without an fsync per update.
         this.emit("usage", entry, undefined, false);
+        this.enforceSpend();
       },
       context: (used: number, size: number) => {
         if (!live()) return;
@@ -884,6 +891,7 @@ export class Orchestrator {
           peak: Math.max(used, entry.view.context?.peak ?? 0),
         };
         this.emit("context", entry, undefined, false);
+        this.enforceSpend();
       },
       partial: (text: string) => {
         // Memory only: no event or checkpoint per streamed fragment.
@@ -1239,6 +1247,24 @@ export class Orchestrator {
 
   private assertSpendAvailable(): void {
     assertSpendWithin(this.spend(), this.options);
+  }
+
+  /** "abort" enforcement: the first crossed cap cancels every live tree once. */
+  private enforceSpend(): void {
+    if (this.options.spendEnforcement !== "abort" || this.spendExhausted)
+      return;
+    try {
+      this.assertSpendAvailable();
+    } catch (error) {
+      this.spendExhausted = true;
+      this.metrics.spendAborts++;
+      const reason = `Session spend limit reached; running work cancelled (${errorText(error)})`;
+      // Deferred: never abort from inside the adapter's own callback.
+      queueMicrotask(() => {
+        for (const id of this.children.get(null) ?? [])
+          this.abortTree(id, reason);
+      });
+    }
   }
 
   /** Real model listings, one short-lived probe per engine (never a prompt); failures are reported per engine. */

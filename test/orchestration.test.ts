@@ -166,3 +166,52 @@ test("a leaf whose every occupied slot is an ancestor is rejected, not deadlocke
     await core.close();
   }
 });
+
+const spending = async (ctx: RuntimeContext) => {
+  ctx.partial?.(`partial of ${ctx.prompt}`);
+  if (ctx.prompt === "spender")
+    ctx.usage?.({ inputTokens: 150, cachedInputTokens: 0, outputTokens: 10 });
+  await delay(60_000, undefined, { signal: ctx.signal });
+  return "unreachable";
+};
+
+test("spend enforcement 'abort' cancels running work once a cap is crossed, keeping partials", async () => {
+  const core = make({
+    maxTokens: 100,
+    spendEnforcement: "abort",
+    maxConcurrent: 3,
+    run: spending,
+  });
+  try {
+    const quiet = core.delegate(null, "codex", "quiet", "quiet");
+    await delay(5);
+    const spender = core.delegate(null, "codex", "spender", "spender");
+    const [a, b] = await core.waitAll(null, [quiet.id, spender.id], 2_000);
+    assert.deepEqual([a!.state, b!.state], ["cancelled", "cancelled"]);
+    assert.match(a!.error!, /spend limit/);
+    assert.match(b!.partialResult!, /partial of spender/);
+    assert.throws(
+      () => core.delegate(null, "codex", "more", "more"),
+      /token limit/,
+    );
+    assert.equal(core.usage().orchestration.spendAborts, 1);
+  } finally {
+    await core.close();
+  }
+});
+
+test("default spend enforcement only refuses new work; running work continues", async () => {
+  const core = make({ maxTokens: 100, maxConcurrent: 3, run: spending });
+  try {
+    const spender = core.delegate(null, "codex", "spender", "spender");
+    await delay(20);
+    assert.equal(core.status(null, spender.id).state, "running");
+    assert.throws(
+      () => core.delegate(null, "codex", "more", "more"),
+      /token limit/,
+    );
+    assert.equal(core.usage().orchestration.spendAborts, 0);
+  } finally {
+    await core.close();
+  }
+});
