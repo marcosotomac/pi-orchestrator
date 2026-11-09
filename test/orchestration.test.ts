@@ -242,3 +242,25 @@ test("a task queued longer than maxQueueWaitMs is cancelled without ever launchi
     await core.close();
   }
 });
+
+test("/orch usage reports every orchestration counter", async () => {
+  const { usageReport } = await import("../src/presentation.ts");
+  const core = make({ queuePolicy: "fair", maxConcurrent: 2 });
+  try {
+    const report = usageReport(core.usage(), core.list());
+    for (const label of [
+      "Orquestación:",
+      "subtareas hoja en cola",
+      "subtareas rechazadas",
+      "caducadas en cola",
+      "cortadas por el plazo del padre",
+      "esperas anidadas acortadas",
+      "llamadas para",
+      "por lote terminado",
+      "anticipados por fallo",
+    ])
+      assert.ok(report.includes(label), label);
+  } finally {
+    await core.close();
+  }
+});

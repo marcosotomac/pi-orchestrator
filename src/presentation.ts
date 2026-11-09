@@ -7,6 +7,7 @@ import {
   type TaskView,
 } from "./types.ts";
 import type { IsolationPreview } from "./workspace.ts";
+import type { OrchestrationMetrics } from "./orchestrator.ts";
 
 /** Provider output is untrusted terminal data: no OSC links, escapes, or control bytes. */
 export function safeText(text: string): string {
@@ -928,6 +929,7 @@ export function usageReport(
         maxTokens?: number;
         maxCostUsd?: number;
         spend?: { tokens: number; costUsd: number; estimatedTokens?: number };
+        orchestration?: OrchestrationMetrics;
       }
     | undefined,
   tasks: TaskView[],
@@ -993,6 +995,24 @@ export function usageReport(
     lines.push(
       `Estimación de entrada sin contador (${estimated.length} ${estimated.length === 1 ? "tarea" : "tareas"}, sobre todo Antigravity): ≥${estimated.reduce((sum, task) => sum + (task.context!.peak ?? task.context!.used), 0).toLocaleString("es")} tokens, cota inferior por el contexto máximo.`,
     );
+  if (usage?.orchestration)
+    lines.push(...orchestrationLines(usage.orchestration));
   lines.push("No es una factura: son los contadores que informa cada motor.");
   return lines.join("\n");
+}
+
+/** Scheduling counters, so each decision can be measured in real sessions and tuned. */
+export function orchestrationLines(metrics: OrchestrationMetrics): string[] {
+  const m = metrics;
+  const span = (ms: number) => (ms < 1_000 ? `${ms} ms` : short(ms));
+  const average = m.queueDispatches
+    ? Math.round(m.queueWaitMsTotal / m.queueDispatches)
+    : 0;
+  return [
+    "Orquestación:",
+    `  Cola: ${m.queueDispatches} esperaron una plaza (media ${span(average)}, máx. ${span(m.queueWaitMsMax)}) · ${m.leafQueued} subtareas hoja en cola · ${m.nestedRejected} subtareas rechazadas · ${m.queueExpired} caducadas en cola`,
+    `  Plazos: ${m.boundedExpiries} subtareas cortadas por el plazo del padre · ${m.waitClamps} esperas anidadas acortadas`,
+    `  Esperas: ${m.waitCalls} llamadas para ${m.waitedTasks} tareas${m.waitCalls ? ` (${(m.waitedTasks / m.waitCalls).toFixed(1)} por llamada)` : ""}`,
+    `  Despertares del modelo: ${m.batchWakes} por lote terminado · ${m.earlyFailureWakes} anticipados por fallo${m.spendAborts ? ` · ${m.spendAborts} cancelaciones por tope de gasto` : ""}`,
+  ];
 }

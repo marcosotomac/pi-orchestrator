@@ -4,7 +4,7 @@ Orquestación de **runtimes reales** de Codex y Claude Code desde Pi, con delega
 
 ## Estado
 
-Prototipo experimental con 252 pruebas locales (`npm test`, sin cuota) y matrices reales probadas en las direcciones Pi → Codex ⇄ Claude ⇄ Antigravity: delegación anidada, cancelación del árbol completo, elección de herramientas por el modelo principal de Pi y persistencia opcional. No es un sistema de producción.
+Prototipo experimental con 263 pruebas locales (`npm test`, sin cuota) y matrices reales probadas en las direcciones Pi → Codex ⇄ Claude ⇄ Antigravity: delegación anidada, cancelación del árbol completo, elección de herramientas por el modelo principal de Pi y persistencia opcional. No es un sistema de producción.
 
 Documentación detallada:
 
@@ -28,7 +28,7 @@ npm run check
 npm test
 ```
 
-La suite contiene 252 pruebas locales; última ejecución paralela completa: 252/252. Los anteriores fallos de deadline/censo motivaron watchdogs de fixtures adecuados para contención y reintentos acotados del censo desconocido, sin cambiar garantías de producción. Véase [RELIABILITY.md](RELIABILITY.md). `npm test` y usa motores simulados y procesos Node: **no ejecuta agentes reales ni consume sus cuotas**. La comprobación TypeScript y `npm audit --omit=dev` también pasaron (sin vulnerabilidades notificadas en dependencias de producción).
+La suite contiene 263 pruebas locales; última ejecución paralela completa: 263/263. Los anteriores fallos de deadline/censo motivaron watchdogs de fixtures adecuados para contención y reintentos acotados del censo desconocido, sin cambiar garantías de producción. Véase [RELIABILITY.md](RELIABILITY.md). `npm test` y usa motores simulados y procesos Node: **no ejecuta agentes reales ni consume sus cuotas**. La comprobación TypeScript y `npm audit --omit=dev` también pasaron (sin vulnerabilidades notificadas en dependencias de producción).
 
 ## Usar desde Pi, sin instalación global
 
@@ -201,7 +201,7 @@ Las herramientas MCP son `delegate`, `status`, `wait` y `cancel`. La identidad d
 - **Actividad real:** los tres motores informan la herramienta y su objetivo ("leyendo AGENTS.md", "ejecutando `ls -la`", "editando a.ts"). El panel muestra los últimos 3 pasos con su antigüedad.
 - **Teclas en una sola línea abajo,** solo las que funcionan para la tarea seleccionada. Si no caben, se acortan o se quitan las menos importantes; `Esc cerrar` siempre queda.
 
-Con la cola justa por defecto, las raíces que exceden la capacidad esperan; una subtarea **hoja** (en la profundidad máxima, que no puede delegar) también espera, con prioridad sobre las raíces, siempre que alguna plaza ocupada pueda liberarse sin depender de ella; si todas las plazas pertenecen a sus ancestros se rechaza en vez de bloquearse. Las subtareas que aún pueden delegar se rechazan si no queda plaza. Cada subtarea termina antes del plazo blando de su padre (con 2 s de margen para su limpieza), y un `wait` anidado vuelve como tarde en ese plazo blando, para que el padre aún pueda sintetizar. `/orch usage` cuenta hojas en cola, rechazos, recortes de plazo y espera en cola. La cadena de tres runtimes `Pi → Codex → Claude → Antigravity` requiere aumentar la profundidad predeterminada; esa cadena de tres runtimes no se ha probado.
+Con la cola justa por defecto, las raíces que exceden la capacidad esperan; una subtarea **hoja** (en la profundidad máxima, que no puede delegar) también espera, con prioridad sobre las raíces, siempre que alguna plaza ocupada pueda liberarse sin depender de ella; si todas las plazas pertenecen a sus ancestros se rechaza en vez de bloquearse. Las subtareas que aún pueden delegar se rechazan si no queda plaza. Cada subtarea termina antes del plazo blando de su padre (con 2 s de margen para su limpieza), y un `wait` anidado vuelve como tarde en ese plazo blando, para que el padre aún pueda sintetizar. `/orch usage` muestra en la sección «Orquestación» los contadores de cada decisión: tareas que esperaron plaza (media y máximo), hojas en cola, subtareas rechazadas, caducadas en cola, subtareas cortadas por el plazo del padre, esperas anidadas acortadas, tareas por llamada de espera y despertares del modelo (por lote y anticipados por fallo). Sirven para medir en sesiones reales y ajustar límites. La cadena de tres runtimes `Pi → Codex → Claude → Antigravity` requiere aumentar la profundidad predeterminada; esa cadena de tres runtimes no se ha probado.
 
 ## Archivos
 
