@@ -1001,6 +1001,30 @@ export function usageReport(
   return lines.join("\n");
 }
 
+/** Counters from older archives may lack newer metrics: they count as zero. */
+export function metricsWithDefaults(
+  partial: Record<string, number>,
+): OrchestrationMetrics {
+  const zero: OrchestrationMetrics = {
+    boundedExpiries: 0,
+    waitClamps: 0,
+    childQueued: 0,
+    nestedRejected: 0,
+    queueDispatches: 0,
+    queueWaitMsTotal: 0,
+    queueWaitMsMax: 0,
+    waitCalls: 0,
+    waitedTasks: 0,
+    batchWakes: 0,
+    earlyFailureWakes: 0,
+    spendAborts: 0,
+    queueExpired: 0,
+  };
+  for (const key of Object.keys(zero) as (keyof OrchestrationMetrics)[])
+    if (typeof partial[key] === "number") zero[key] = partial[key];
+  return zero;
+}
+
 /** Scheduling counters, so each decision can be measured in real sessions and tuned. */
 export function orchestrationLines(metrics: OrchestrationMetrics): string[] {
   const m = metrics;

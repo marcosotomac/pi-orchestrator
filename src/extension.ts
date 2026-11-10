@@ -35,8 +35,11 @@ import {
   formatInteractionDetail,
   helpText,
   yoloConfirmation,
+  orchestrationLines,
+  metricsWithDefaults,
   type Attention,
 } from "./presentation.ts";
+import { sumMetrics } from "./insights.ts";
 import { createService } from "./service.ts";
 import { DeliveryLedger, modelTask } from "./model-view.ts";
 import { type HistoryPage, type RunRecord } from "./journal.ts";
@@ -739,11 +742,22 @@ export function createOrchestratorExtension(
           current: "sesión actual",
           unreconciled: "sin reconciliar; podría seguir activo en otra sesión",
         };
+        const measured = data.history.runs.filter((run) => run.metrics);
         text = [
           "Historial persistido · solo lectura",
+          ...(measured.length
+            ? [
+                `Tendencia de ${measured.length} ${measured.length === 1 ? "run medido" : "runs medidos"} (suma; espera máxima global):`,
+                ...orchestrationLines(
+                  metricsWithDefaults(
+                    sumMetrics(measured.map((run) => run.metrics)),
+                  ),
+                ).slice(1),
+              ]
+            : []),
           ...data.history.runs.map(
             (run) =>
-              `${run.runId} · ${labels[run.disposition]} · ${run.tasks} tareas\n${run.cwd}`,
+              `${run.runId} · ${labels[run.disposition]} · ${run.tasks} tareas (${run.completed} completadas, ${run.failed} fallidas, ${run.cancelled} canceladas)\n${run.cwd}`,
           ),
           ...(data.history.unavailable.length
             ? [
