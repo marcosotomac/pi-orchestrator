@@ -192,6 +192,10 @@ export class Orchestrator {
   };
   /** Children waiting for a slot; dispatched before roots (their ancestors hold slots). */
   private childQueue: string[] = [];
+  /** Started, unsettled tasks: at most maxConcurrent, so deadlock checks stay O(slots). */
+  private running = new Set<string>();
+  /** Per task: queued descendants waiting on it. Maintained incrementally (O(depth)). */
+  private queuedBelow = new Map<string, number>();
   readonly cwd: string;
   readonly limits: {
     maxDepth: number;
@@ -658,6 +662,7 @@ export class Orchestrator {
     siblings.add(view.id);
     this.children.set(callerId, siblings);
     if (!queued) {
+      this.running.add(view.id);
       this.activeCount++;
       if (callerId === null) this.activeRoots++;
       this.identities.set(entry.tokenHash, view.id);
@@ -681,6 +686,7 @@ export class Orchestrator {
       }
       if (queuedChild) {
         this.childQueue.push(view.id);
+        this.blockAncestors(callerId, 1);
         this.metrics.childQueued++;
       } else this.queue.push(engine, view.id);
       // Dispatched within its own admission, it never actually waited.
@@ -1124,6 +1130,7 @@ export class Orchestrator {
       );
     delete entry.partial;
     entry.view.endedAt = new Date().toISOString();
+    this.running.delete(entry.view.id);
     this.activeCount--;
     if (entry.view.parentId === null) this.activeRoots--;
     this.budget.setActive(this.activeCount);
@@ -1331,10 +1338,20 @@ export class Orchestrator {
 
   /** Provider-reported spend so far: tokens from every engine, dollars only where reported (Claude). */
   spend(): SessionSpend {
-    return sessionSpend([...this.entries.values()].map(({ view }) => view));
+    const views = function* (entries: Iterable<Entry>) {
+      for (const { view } of entries) yield view;
+    };
+    return sessionSpend(views(this.entries.values()));
   }
 
   private assertSpendAvailable(): void {
+    // Without caps there is nothing to check: spend() is O(tasks) and ran on every
+    // admission and usage report (measured: ~78% of scheduling time at 4,000 tasks).
+    if (
+      this.options.maxTokens === undefined &&
+      this.options.maxCostUsd === undefined
+    )
+      return;
     assertSpendWithin(this.spend(), this.options);
   }
 
@@ -1412,19 +1429,29 @@ export class Orchestrator {
    * one about to be queued under `parentId`): its slot frees without waiting on them.
    */
   private slotCanFree(parentId: string): boolean {
-    const blocked = new Set<string>();
-    const climb = (id: string | null | undefined) => {
-      while (id && !blocked.has(id)) {
-        blocked.add(id);
-        id = this.entries.get(id)?.view.parentId;
-      }
-    };
-    climb(parentId);
-    for (const id of this.childQueue)
-      climb(this.entries.get(id)?.view.parentId);
-    for (const { view, started } of this.entries.values())
-      if (started && !isTerminal(view) && !blocked.has(view.id)) return true;
+    const ancestors = new Set<string>();
+    for (
+      let id: string | null | undefined = parentId;
+      id;
+      id = this.entries.get(id)?.view.parentId
+    )
+      ancestors.add(id);
+    for (const id of this.running)
+      if (!ancestors.has(id) && !this.queuedBelow.has(id)) return true;
     return false;
+  }
+
+  /** Adds (or removes) one queued descendant to every ancestor from `parentId` up. */
+  private blockAncestors(parentId: string | null, delta: 1 | -1): void {
+    for (
+      let id: string | null | undefined = parentId;
+      id;
+      id = this.entries.get(id)?.view.parentId
+    ) {
+      const count = (this.queuedBelow.get(id) ?? 0) + delta;
+      if (count > 0) this.queuedBelow.set(id, count);
+      else this.queuedBelow.delete(id);
+    }
   }
 
   private pump(): void {
@@ -1435,6 +1462,7 @@ export class Orchestrator {
       this.childQueue.length
     ) {
       const entry = this.entry(this.childQueue.shift()!);
+      this.blockAncestors(entry.view.parentId, -1);
       if (!isTerminal(entry.view)) this.dispatch(entry, false);
     }
     while (
@@ -1453,6 +1481,7 @@ export class Orchestrator {
     clearTimeout(entry.queueTimer);
     entry.started = true;
     transitionTask(entry.view, "running");
+    this.running.add(entry.view.id);
     this.activeCount++;
     if (root) this.activeRoots++;
     if (entry.queuedAt !== undefined && entry.view.id !== this.admitting) {
@@ -1491,9 +1520,11 @@ export class Orchestrator {
       if (!entry.started) {
         clearTimeout(entry.queueTimer);
         this.queue.remove(current);
-        this.childQueue = this.childQueue.filter(
-          (queued) => queued !== current,
-        );
+        const at = this.childQueue.indexOf(current);
+        if (at >= 0) {
+          this.childQueue.splice(at, 1);
+          this.blockAncestors(entry.view.parentId, -1);
+        }
         delete entry.launch;
         if (
           entry.resumeSessionId &&
