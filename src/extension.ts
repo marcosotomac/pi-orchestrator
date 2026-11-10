@@ -39,10 +39,10 @@ import {
   metricsWithDefaults,
   type Attention,
 } from "./presentation.ts";
-import { sumMetrics } from "./insights.ts";
+import { engineRecords, sumMetrics } from "./insights.ts";
 import { createService } from "./service.ts";
 import { DeliveryLedger, modelTask } from "./model-view.ts";
-import { type HistoryPage, type RunRecord } from "./journal.ts";
+import { RunStore, type HistoryPage, type RunRecord } from "./journal.ts";
 import { productDefaults, runtimeConfiguration } from "./configuration.ts";
 import { detectAntigravity } from "./antigravity-installation.ts";
 import { reconcileRun, reconciliationWarning } from "./reconciliation.ts";
@@ -534,6 +534,8 @@ export function createOrchestratorExtension(
         onEvent(event) {
           if (!active) return;
           snapshots.set(event.task.id, event.task);
+          // A fresh outcome (e.g. a quota failure) must reach the next delegation.
+          if (event.type === "settled") invalidateRecord();
           // High-frequency display events reach the session file at most every 2 s per task;
           // lifecycle events (started, settled, changes…) are always recorded.
           const frequent =
@@ -928,9 +930,31 @@ export function createOrchestratorExtension(
       };
     });
 
+    // Track record per engine: recent archived runs (the current one included, since
+    // every settle is checkpointed), or this session alone without persistence.
+    let recordCache:
+      | { at: number; value: ReturnType<typeof engineRecords> }
+      | undefined;
+    const trackRecord = () => {
+      if (recordCache && Date.now() - recordCache.at < 30_000)
+        return recordCache.value;
+      let tasks: Parameters<typeof engineRecords>[0] = coreRef?.list() ?? [];
+      if (stateDirectory)
+        try {
+          tasks = new RunStore(stateDirectory).recentTasks(20);
+        } catch {
+          /* history is advisory; fall back to this session */
+        }
+      recordCache = { at: Date.now(), value: engineRecords(tasks) };
+      return recordCache.value;
+    };
+    const invalidateRecord = () => {
+      recordCache = undefined;
+    };
     registerOrchestratorTools(pi, {
       get,
       reply,
+      trackRecord,
       once,
       deferred,
       isolationEnabled,

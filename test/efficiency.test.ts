@@ -540,3 +540,62 @@ test("a failure wakes the model early without waiting for slow siblings; the res
     await service?.close();
   }
 });
+
+test("after a quota failure, delegating to the same engine warns the model; engines report the track record", async () => {
+  let service: Service | undefined;
+  const tools = new Map<string, any>();
+  const fake = {
+    registerMessageRenderer() {},
+    on() {},
+    appendEntry() {},
+    sendUserMessage() {},
+    registerCommand() {},
+    sendMessage() {},
+    registerTool(tool: any) {
+      tools.set(tool.name, tool);
+    },
+  } as unknown as ExtensionAPI;
+  createOrchestratorExtension(
+    async (options) => {
+      service = await createService(
+        { ...options, stateDirectory: undefined },
+        {
+          claude: {
+            capabilities,
+            run: async () => {
+              throw new Error("Claude usage quota exceeded for this account");
+            },
+          },
+          codex: { capabilities, run: async () => "fine" },
+        },
+      );
+      return service;
+    },
+    { stateDirectory: undefined },
+  )(fake);
+  const ctx = {
+    cwd: process.cwd(),
+    mode: "json",
+    ui: {},
+  } as unknown as ExtensionCommandContext;
+  const delegate = async (engine: string, prompt: string) =>
+    JSON.parse(
+      (
+        await tools
+          .get("orchestrator_delegate")
+          .execute(prompt, { engine, prompt }, undefined, undefined, ctx)
+      ).content[0].text,
+    );
+  try {
+    const first = await delegate("claude", "one");
+    assert.equal(first.warning, undefined, "no history yet");
+    const failed = await service!.core.wait(null, first.id ?? first.taskId);
+    assert.equal(failed.diagnostic?.category, "quota");
+    const second = await delegate("claude", "two");
+    assert.match(second.warning, /claude's latest task failed with quota/);
+    const other = await delegate("codex", "three");
+    assert.equal(other.warning, undefined, "other engines are unaffected");
+  } finally {
+    await service?.close();
+  }
+});

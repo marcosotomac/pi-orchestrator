@@ -8,7 +8,13 @@ import {
 import { type Service } from "./service.ts";
 import { DeliveryLedger, modelTask } from "./model-view.ts";
 import { resolveTask, safeText, yoloConfirmation } from "./presentation.ts";
-import { isTerminal, yoloSandbox, type TaskView } from "./types.ts";
+import {
+  isTerminal,
+  yoloSandbox,
+  type Engine,
+  type TaskView,
+} from "./types.ts";
+import type { EngineRecord } from "./insights.ts";
 import { isolationPreview } from "./workspace.ts";
 
 export interface ToolDependencies {
@@ -21,6 +27,8 @@ export interface ToolDependencies {
   track(task: TaskView, ctx: ExtensionContext): void;
   deferred(): boolean;
   isolationEnabled(): boolean;
+  /** Per-engine outcomes of recent tasks (advisory; never blocks delegation). */
+  trackRecord(): Partial<Record<Engine, EngineRecord>>;
   ledger: DeliveryLedger;
   waiting: Map<string, number>;
   scheduleFlush(): void;
@@ -38,6 +46,7 @@ export function registerOrchestratorTools(
     track,
     deferred,
     isolationEnabled,
+    trackRecord,
     ledger,
     waiting,
     scheduleFlush,
@@ -166,9 +175,16 @@ export function registerOrchestratorTools(
           params.title,
         );
         track(task, ctx);
+        const blocked = trackRecord()[params.engine]?.blocked;
         return reply(task, {
           ...once(task),
           next: deferred() ? NEXT_DEFERRED : NEXT_BLOCKING,
+          // Delegation still goes ahead: a quota can reset. The model decides.
+          ...(blocked
+            ? {
+                warning: `${params.engine}'s latest task failed with ${blocked.category} at ${blocked.at} and none has succeeded since; this one may fail the same way. Consider another engine, or tell the operator.`,
+              }
+            : {}),
         });
       },
     }),
@@ -273,7 +289,7 @@ export function registerOrchestratorTools(
       name: "orchestrator_engines",
       label: "Runtime models",
       description:
-        "List the models and thinking levels each engine really offers right now (Codex model/list, Antigravity's session catalog, Claude aliases). Call it when the operator names a model or level you are not sure about, instead of guessing an ID. Cached for 15 minutes; sends no prompt.",
+        "List the models and thinking levels each engine really offers right now (Codex model/list, Antigravity's session catalog, Claude aliases). Call it when the operator names a model or level you are not sure about, instead of guessing an ID. Also returns trackRecord: per engine, recent completed/failed tasks, failure categories, median duration and tokens, and `blocked` when its latest outcome was a quota or authentication failure; use it to pick an engine when the operator did not name one. Cached for 15 minutes; sends no prompt.",
       parameters: Type.Object({ refresh: Type.Optional(Type.Boolean()) }),
       async execute(_id, params, signal, _update, ctx) {
         const { core } = await get(ctx);
@@ -289,7 +305,12 @@ export function registerOrchestratorTools(
           });
         }
         const catalog = await catalogCache.value;
-        return reply(catalog, catalog);
+        // Observed outcomes help choose an engine; they are history, not a guarantee.
+        const record = trackRecord();
+        return reply(catalog, {
+          ...(catalog as Record<string, unknown>),
+          ...(Object.keys(record).length ? { trackRecord: record } : {}),
+        });
       },
     }),
   );

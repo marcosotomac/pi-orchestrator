@@ -123,6 +123,7 @@ Suite secuencial histórica: **166/166**; evidencia `artifacts/interactive-sched
 
 ## Catálogo de modelos y topes de gasto
 
+- **Historial por motor:** `orchestrator_engines` añade `trackRecord` con las tareas recientes de cada motor (de los últimos 20 runs guardados, o de la sesión si no hay persistencia): completadas, fallidas por categoría, mediana de duración y de tokens, y `blocked` si su último resultado fue un fallo de cuota o autenticación sin éxitos después. Delegar en un motor bloqueado no se impide (la cuota puede renovarse), pero el resultado de `orchestrator_delegate` lleva un `warning` para que el modelo pueda elegir otro motor o avisar.
 - `orchestrator_engines` lista lo que cada motor ofrece de verdad, sin enviar ningún prompt, y lo cachea 15 min:
   - Codex con `model/list`.
   - Antigravity abre una sesión breve para leer su catálogo.
