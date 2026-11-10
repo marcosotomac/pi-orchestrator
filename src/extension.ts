@@ -37,6 +37,7 @@ import {
   yoloConfirmation,
   orchestrationLines,
   metricsWithDefaults,
+  engineRecordLines,
   type Attention,
 } from "./presentation.ts";
 import { engineRecords, sumMetrics } from "./insights.ts";
@@ -676,6 +677,7 @@ export function createOrchestratorExtension(
             archive?: RunRecord;
             reconciliation?: ReturnType<typeof reconcileRun>;
             installation?: ReturnType<typeof detectAntigravity>;
+            trackRecord?: ReturnType<typeof engineRecords>;
           }
         | TaskView[]
         | TaskView
@@ -819,7 +821,10 @@ export function createOrchestratorExtension(
         "installation" in data &&
         data.installation
       ) {
-        text = `Antigravity: ${data.installation.status}\nACP: ${data.installation.executable ?? "no localizado"}\nNo se inició ningún servicio ni runtime. La presencia del binario no acredita autenticación ni compatibilidad.`;
+        text = [
+          ...engineRecordLines(data.trackRecord),
+          `Antigravity: ${data.installation.status}\nACP: ${data.installation.executable ?? "no localizado"}\nNo se inició ningún servicio ni runtime. La presencia del binario no acredita autenticación ni compatibilidad.`,
+        ].join("\n");
       } else if (Array.isArray(data))
         text = [
           summary(data),
@@ -1102,6 +1107,7 @@ export function createOrchestratorExtension(
       tasks,
       stateDirectory,
       demoPrompt,
+      trackRecord: () => trackRecord(),
       async reset(ctx) {
         const previous = service;
         service = undefined;

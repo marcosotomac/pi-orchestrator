@@ -800,6 +800,8 @@ export class Orchestrator {
       if (bound < timeoutMs) timeoutMs = Math.max(0, bound);
     }
     entry.deadlineAt = now + timeoutMs;
+    entry.view.deadlineAt = new Date(entry.deadlineAt).toISOString();
+    if (timeoutMs < this.limits.timeoutMs) entry.view.deadlineBounded = true;
     entry.softAt = now + Math.floor(timeoutMs * SOFT_DEADLINE);
     const bounded = timeoutMs < this.limits.timeoutMs;
     const timer = setTimeout(() => {

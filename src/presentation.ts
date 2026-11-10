@@ -8,6 +8,7 @@ import {
 } from "./types.ts";
 import type { IsolationPreview } from "./workspace.ts";
 import type { OrchestrationMetrics } from "./orchestrator.ts";
+import type { EngineRecord } from "./insights.ts";
 
 /** Provider output is untrusted terminal data: no OSC links, escapes, or control bytes. */
 export function safeText(text: string): string {
@@ -301,6 +302,9 @@ const short = (ms: number) => {
       : `${Math.floor(s / 3_600)}h ${Math.floor((s % 3_600) / 60)}m`;
 };
 
+/** A running task this close to its hard deadline shows the time left. */
+export const DEADLINE_WARNING_MS = 120_000;
+
 /** Host facts first (children, stall), then the engine's own reported action. */
 export function taskDetail(
   task: TaskView,
@@ -312,6 +316,15 @@ export function taskDetail(
   // The orchestrator's own action (soft deadline) is a host fact, not an engine report.
   if (task.lastActivity?.startsWith("orchestrator: "))
     return { text: task.lastActivity.slice(14), tone: "warning" };
+  // Warn before the cut, not after: the operator can still steer or wait.
+  if (task.deadlineAt) {
+    const left = Date.parse(task.deadlineAt) - now;
+    if (left <= DEADLINE_WARNING_MS)
+      return {
+        text: `${left > 0 ? `quedan ${short(left)} de plazo` : "plazo agotado"}${task.deadlineBounded ? " (acotado al de su padre)" : ""}`,
+        tone: "warning",
+      };
+  }
   const live = tasks.filter(
     (child) => child.parentId === task.id && !isTerminal(child),
   );
@@ -331,6 +344,14 @@ export function taskDetail(
     };
   const action = activityLabel(task.lastActivity);
   return { text: action ? `motor: ${action}` : undefined, tone: "muted" };
+}
+
+export function fullEngineName(engine: TaskView["engine"]): string {
+  return engine === "codex"
+    ? "Codex"
+    : engine === "claude"
+      ? "Claude"
+      : "Antigravity";
 }
 
 export function engineName(engine: TaskView["engine"]): string {
@@ -409,11 +430,10 @@ export function modelLabel(task: TaskView): string {
   }
   return safeText(
     [
-      task.engine === "codex"
-        ? "Codex"
-        : task.engine === "claude"
-          ? "Claude"
-          : "Antigravity",
+      fullEngineName(task.engine),
+      task.fallbackFrom
+        ? `en lugar de ${fullEngineName(task.fallbackFrom)}, que falló por cuota o sesión`
+        : undefined,
       model ? modelName(model) : "modelo por defecto",
       thinking
         ? `razonamiento ${thinkingName(thinking)}${defaulted ? " (por defecto)" : ""}`
@@ -1044,3 +1064,60 @@ export function orchestrationLines(metrics: OrchestrationMetrics): string[] {
       : []),
   ];
 }
+
+/** Operator view of each engine's recent outcomes; history, not a guarantee. */
+export function engineRecordLines(
+  records: Partial<Record<TaskView["engine"], EngineRecord>> | undefined,
+): string[] {
+  const engines = (["claude", "codex", "antigravity"] as const).filter(
+    (engine) => records?.[engine],
+  );
+  if (!engines.length)
+    return ["Historial por motor: aún no hay tareas terminadas."];
+  return [
+    "Historial reciente por motor:",
+    ...engines.map((engine) => {
+      const record = records![engine]!;
+      const failures = Object.entries(record.failures)
+        .map(([category, count]) => `${count} ${categoryName(category)}`)
+        .join(", ");
+      return safeText(
+        [
+          `  ${fullEngineName(engine)}: ${record.completed}/${record.tasks} completadas`,
+          record.failed ? `${record.failed} fallidas (${failures})` : undefined,
+          record.medianMs !== undefined
+            ? `mediana ${short(record.medianMs)}`
+            : undefined,
+          record.medianTokens !== undefined
+            ? `${formatTokenCount(record.medianTokens)} tokens`
+            : undefined,
+          record.blocked
+            ? `⚠ bloqueado: último fallo por ${categoryName(record.blocked.category)}`
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      );
+    }),
+  ];
+}
+
+const categoryName = (category: string): string =>
+  (
+    ({
+      quota: "cuota",
+      authentication: "sesión/autenticación",
+      network: "red",
+      transient: "error temporal del proveedor",
+      protocol: "protocolo",
+      cleanup: "limpieza",
+      unknown: "otros",
+    }) as Record<string, string>
+  )[category] ?? category;
+
+const formatTokenCount = (n: number): string =>
+  n >= 1_000_000
+    ? `${(n / 1_000_000).toFixed(1)}M`
+    : n >= 1_000
+      ? `${Math.round(n / 1_000)}k`
+      : String(n);

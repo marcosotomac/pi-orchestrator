@@ -8,6 +8,7 @@ import { RunStore } from "./journal.ts";
 import { resolveTask, safeText, usageReport } from "./presentation.ts";
 import { detectAntigravity } from "./antigravity-installation.ts";
 import { configurationReport } from "./configuration.ts";
+import type { EngineRecord } from "./insights.ts";
 import { planRecovery, recoveryWarning } from "./recovery.ts";
 import { processCensus, reconcileRun } from "./reconciliation.ts";
 import { isTerminal, type Engine, type TaskView } from "./types.ts";
@@ -21,6 +22,7 @@ export interface CommandDependencies {
   demoPrompt: string;
   reset(ctx: ExtensionContext): Promise<void>;
   openPanel(ctx: ExtensionContext): Promise<void>;
+  trackRecord(): Partial<Record<Engine, EngineRecord>>;
 }
 export function registerOrchestratorCommands(
   pi: ExtensionAPI,
@@ -92,7 +94,10 @@ export function registerOrchestratorCommands(
         return;
       }
       if (verb === "engines") {
-        message({ installation: detectAntigravity() });
+        message({
+          installation: detectAntigravity(),
+          trackRecord: dependencies.trackRecord(),
+        });
         return;
       }
       if (verb === "config") {

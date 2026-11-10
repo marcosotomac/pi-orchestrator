@@ -55,6 +55,9 @@ export interface TaskUsage {
 export interface TaskView {
   /** Engine whose quota/authentication failure made this task rerun on `engine`. */
   fallbackFrom?: Engine;
+  /** Hard deadline of the running attempt; `deadlineBounded` when cut to fit the parent's. Display only. */
+  deadlineAt?: string;
+  deadlineBounded?: boolean;
   id: string;
   title: string;
   attemptId: string;
