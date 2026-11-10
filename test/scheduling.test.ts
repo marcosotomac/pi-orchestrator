@@ -112,12 +112,14 @@ test("queued cancellation and shutdown never launch queued adapters, and reserve
     const child = core.delegate(parent.id, "claude", "child", "child");
     assert.equal(child.state, "running");
     assert.equal(core.usage().activeSlots, 2);
-    assert.throws(
-      () => core.delegate(parent.id, "codex", "nested overflow", "overflow"),
-      /nested work cannot queue/,
-    );
+    // A leaf at full capacity waits (its sibling's slot can free) and is never launched early.
+    const overflow = core.delegate(parent.id, "codex", "nested overflow", "o");
+    assert.equal(overflow.state, "queued");
+    assert.equal(core.usage().queued, 2);
     assert.equal((await core.cancel(null, queued.id)).state, "cancelled");
     assert.equal(core.status(null, queued.id).runtimeProcess, undefined);
+    assert.equal((await core.cancel(null, overflow.id)).state, "cancelled");
+    assert.equal(core.status(null, overflow.id).runtimeProcess, undefined);
     assert.equal(core.usage().queued, 0);
     await core.close();
     assert.ok(core.list().every((task) => task.state === "cancelled"));

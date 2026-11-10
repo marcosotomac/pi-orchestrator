@@ -27,5 +27,7 @@ jobs:
       - run: npm run format:check
       - run: npm test
       - run: npm run test:installer
+      # PTY harness regressions only; tui-smoke.py needs the real Pi CLI.
+      - run: python3 test/tui_harness_test.py
 # Live smoke/benchmark scripts deliberately have no workflow: they require explicit
 # operator approval, provider credentials and a quota budget. Never run on PRs.

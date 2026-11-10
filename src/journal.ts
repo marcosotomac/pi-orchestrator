@@ -27,6 +27,7 @@ const taskSchema = z
     attemptId: id,
     parentId: id.nullable(),
     engine: z.enum(["codex", "claude", "antigravity"]),
+    fallbackFrom: z.enum(["codex", "claude", "antigravity"]).optional(),
     depth: z.number().int().min(1).max(256),
     cwd: z.string().min(1).max(8_192),
     state: z.enum([
@@ -153,6 +154,14 @@ const runSchema = z
     sequence: z.number().int().nonnegative(),
     closedAt: timestamp.optional(),
     tasks: z.array(taskSchema).max(256),
+    /** Orchestration counters at the last checkpoint; open-ended so new metrics need no migration. */
+    metrics: z
+      .record(
+        z.string().regex(/^[A-Za-z]{1,40}$/),
+        z.number().nonnegative().finite(),
+      )
+      .refine((value) => Object.keys(value).length <= 64)
+      .optional(),
   })
   .strict()
   .superRefine((run, ctx) => {
@@ -214,6 +223,10 @@ export interface RunSummary {
   sequence: number;
   tasks: number;
   disposition: "closed" | "current" | "unreconciled";
+  completed: number;
+  failed: number;
+  cancelled: number;
+  metrics?: Record<string, number>;
 }
 export interface HistoryPage {
   runs: RunSummary[];
@@ -340,6 +353,34 @@ export class RunStore {
       }
     }
   }
+  /** Tasks of the most recently modified valid runs, for track records. Read-only, bounded. */
+  recentTasks(limit = 20, excludeRunId?: string): RunRecord["tasks"] {
+    if (!this.checkRoot(false)) return [];
+    const names = readdirSync(this.directory)
+      .filter(
+        (name) => archiveName.test(name) && name !== `${excludeRunId}.json`,
+      )
+      .map((name) => {
+        try {
+          return {
+            name,
+            modified: lstatSync(join(this.directory, name)).mtimeMs,
+          };
+        } catch {
+          return { name, modified: 0 };
+        }
+      })
+      .sort((a, b) => b.modified - a.modified)
+      .slice(0, Math.max(0, Math.min(limit, 50)));
+    return names.flatMap(({ name }) => {
+      try {
+        return this.read(name.slice(0, -5)).tasks;
+      } catch {
+        return [];
+      }
+    });
+  }
+
   history(currentRunId?: string): HistoryPage {
     if (!this.checkRoot(false))
       return { runs: [], unavailable: [], omitted: 0 };
@@ -371,6 +412,12 @@ export class RunStore {
           updatedAt: run.updatedAt,
           sequence: run.sequence,
           tasks: run.tasks.length,
+          completed: run.tasks.filter((task) => task.state === "completed")
+            .length,
+          failed: run.tasks.filter((task) => task.state === "failed").length,
+          cancelled: run.tasks.filter((task) => task.state === "cancelled")
+            .length,
+          ...(run.metrics ? { metrics: { ...run.metrics } } : {}),
           disposition: run.closedAt
             ? "closed"
             : runId === currentRunId
@@ -457,7 +504,7 @@ export class RunJournal {
       tasks: [],
     });
   }
-  checkpoint(tasks: TaskView[]): void {
+  checkpoint(tasks: TaskView[], metrics?: Record<string, number>): void {
     if (this.record.closedAt) throw new Error("Run journal is already closed");
     const projected = tasks.map((task) => {
       const parsed = taskSchema.safeParse(
@@ -476,6 +523,7 @@ export class RunJournal {
       updatedAt: new Date().toISOString(),
       sequence: this.record.sequence + 1,
       tasks: projected,
+      ...(metrics ? { metrics: { ...metrics } } : {}),
     });
   }
   close(): void {

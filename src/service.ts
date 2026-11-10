@@ -30,7 +30,8 @@ export async function createService(
   const core = new Orchestrator({
     ...options,
     adapters,
-    checkpoint: (tasks) => journal?.checkpoint(tasks),
+    checkpoint: (tasks) =>
+      journal?.checkpoint(tasks, { ...core.usage().orchestration }),
   });
   // Failure here opens no bridge and launches no runtime. Persistence is explicitly opt-in.
   if (options.stateDirectory) {
@@ -58,7 +59,7 @@ export async function createService(
       (closing ??= (async () => {
         // Storage problems must never prevent process/transport cleanup.
         await bridge.close();
-        journal?.checkpoint(core.list());
+        journal?.checkpoint(core.list(), { ...core.usage().orchestration });
         journal?.close();
       })()),
   };

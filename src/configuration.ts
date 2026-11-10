@@ -32,6 +32,7 @@ export function runtimeConfiguration(
     PI_ORCHESTRATOR_MAX_RUNTIME_MS: "maxRuntimeMs",
     PI_ORCHESTRATOR_TASK_TIMEOUT_MS: "timeoutMs",
     PI_ORCHESTRATOR_MAX_QUEUED: "maxQueued",
+    PI_ORCHESTRATOR_MAX_QUEUE_WAIT_MS: "maxQueueWaitMs",
     PI_ORCHESTRATOR_RESERVED_CHILD_SLOTS: "reservedChildSlots",
     PI_ORCHESTRATOR_INTERACTION_TIMEOUT_MS: "interactionTimeoutMs",
   } as const;
@@ -80,10 +81,247 @@ export function runtimeConfiguration(
       );
     options.isolateWrites = env.PI_ORCHESTRATOR_ISOLATE_WRITES === "1";
   }
+  if (env.PI_ORCHESTRATOR_FALLBACK !== undefined) {
+    // "claude:codex,codex:claude": on quota/auth failure, rerun once on the target.
+    const engines = ["codex", "claude", "antigravity"];
+    const fallback: Record<string, string> = {};
+    for (const pair of env.PI_ORCHESTRATOR_FALLBACK.split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)) {
+      const [from, to, extra] = pair.split(":");
+      if (
+        extra !== undefined ||
+        !engines.includes(from ?? "") ||
+        !engines.includes(to ?? "") ||
+        from === to ||
+        fallback[from!]
+      )
+        throw new Error(
+          "Invalid PI_ORCHESTRATOR_FALLBACK (expected engine:engine pairs, e.g. claude:codex,codex:claude)",
+        );
+      fallback[from!] = to!;
+    }
+    options.fallback = fallback as OrchestratorOptions["fallback"];
+  }
+  if (env.PI_ORCHESTRATOR_SPEND_ENFORCEMENT !== undefined) {
+    if (!["admission", "abort"].includes(env.PI_ORCHESTRATOR_SPEND_ENFORCEMENT))
+      throw new Error(
+        "Invalid PI_ORCHESTRATOR_SPEND_ENFORCEMENT (expected admission or abort)",
+      );
+    options.spendEnforcement = env.PI_ORCHESTRATOR_SPEND_ENFORCEMENT as
+      | "admission"
+      | "abort";
+  }
   if (env.PI_ORCHESTRATOR_QUEUE !== undefined) {
     if (!["reject", "fair"].includes(env.PI_ORCHESTRATOR_QUEUE))
       throw new Error("Invalid orchestrator queue policy");
     options.queuePolicy = env.PI_ORCHESTRATOR_QUEUE as "reject" | "fair";
   }
   return options;
+}
+
+/** Every PI_ORCHESTRATOR_* setting, for `/orch config`; a test keeps it in sync with src/. */
+export const settingsRegistry: readonly {
+  name: string;
+  fallback: string;
+  description: string;
+}[] = [
+  {
+    name: "PI_ORCHESTRATOR_MAX_CONCURRENT",
+    fallback: "4",
+    description: "plazas de runtime simultáneas",
+  },
+  {
+    name: "PI_ORCHESTRATOR_MAX_TASKS",
+    fallback: "32",
+    description: "tareas por sesión del núcleo",
+  },
+  {
+    name: "PI_ORCHESTRATOR_MAX_DEPTH",
+    fallback: "2",
+    description: "runtimes anidados bajo Pi",
+  },
+  {
+    name: "PI_ORCHESTRATOR_MAX_QUEUED",
+    fallback: "32",
+    description: "raíces en cola",
+  },
+  {
+    name: "PI_ORCHESTRATOR_MAX_QUEUE_WAIT_MS",
+    fallback: "sin límite",
+    description: "espera máxima en cola antes de cancelar sin lanzar",
+  },
+  {
+    name: "PI_ORCHESTRATOR_RESERVED_CHILD_SLOTS",
+    fallback: "1",
+    description: "plazas reservadas a subtareas",
+  },
+  {
+    name: "PI_ORCHESTRATOR_QUEUE",
+    fallback: "fair",
+    description: "política de cola (fair|reject)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_TASK_TIMEOUT_MS",
+    fallback: "900000",
+    description: "plazo por intento",
+  },
+  {
+    name: "PI_ORCHESTRATOR_MAX_RUNTIME_MS",
+    fallback: "sin límite",
+    description: "tiempo total de runtime de la sesión",
+  },
+  {
+    name: "PI_ORCHESTRATOR_INTERACTION_TIMEOUT_MS",
+    fallback: "300000",
+    description: "espera de permisos y preguntas",
+  },
+  {
+    name: "PI_ORCHESTRATOR_MAX_TOKENS",
+    fallback: "sin límite",
+    description: "tope de tokens de la sesión",
+  },
+  {
+    name: "PI_ORCHESTRATOR_MAX_COST_USD",
+    fallback: "sin límite",
+    description: "tope en USD de la sesión (solo Claude informa dólares)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_FALLBACK",
+    fallback: "ninguno",
+    description: "motor alternativo ante cuota/autenticación (claude:codex,…)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_SPEND_ENFORCEMENT",
+    fallback: "admission",
+    description:
+      "al llegar al tope: admission (rechaza nuevo) | abort (cancela lo vivo)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_ALLOWED_ROOTS",
+    fallback: "solo el cwd",
+    description: "directorios extra para cwd por tarea",
+  },
+  {
+    name: "PI_ORCHESTRATOR_ISOLATE_WRITES",
+    fallback: "1",
+    description: "YOLO en worktree aislado (0|1)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_YOLO_SANDBOX",
+    fallback: "on",
+    description: "sandbox de Bash en YOLO (on|off)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_STATE_DIR",
+    fallback: "~/.pi/agent/orchestrator-state",
+    description: "historial (ruta|off)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_EARLY_FAILURE_WAKE",
+    fallback: "1",
+    description: "despertar al modelo ante un fallo sin esperar al lote (0|1)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_NOTIFY",
+    fallback: "desktop",
+    description: "avisos (desktop|bell|off)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_CODEX_MODEL",
+    fallback: "config de Codex",
+    description: "modelo de Codex por defecto",
+  },
+  {
+    name: "PI_ORCHESTRATOR_CODEX_THINKING",
+    fallback: "—",
+    description: "thinking de Codex por defecto",
+  },
+  {
+    name: "PI_ORCHESTRATOR_CODEX_DEFAULT_THINKING",
+    fallback: "medium",
+    description: "esfuerzo de Codex sin thinking",
+  },
+  {
+    name: "PI_ORCHESTRATOR_CLAUDE_MODEL",
+    fallback: "sonnet",
+    description: "modelo de Claude por defecto",
+  },
+  {
+    name: "PI_ORCHESTRATOR_CLAUDE_THINKING",
+    fallback: "—",
+    description: "thinking de Claude por defecto",
+  },
+  {
+    name: "PI_ORCHESTRATOR_CLAUDE_MAX_TURNS",
+    fallback: "40",
+    description: "turnos de Claude (1–500)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_CLAUDE_MAX_BUDGET_USD",
+    fallback: "1.00",
+    description: "--max-budget-usd por tarea",
+  },
+  {
+    name: "PI_ORCHESTRATOR_ANTIGRAVITY_MODEL",
+    fallback: "del runtime",
+    description: "modelo de Antigravity por defecto",
+  },
+  {
+    name: "PI_ORCHESTRATOR_ANTIGRAVITY_THINKING",
+    fallback: "—",
+    description: "thinking de Antigravity por defecto",
+  },
+  {
+    name: "PI_ORCHESTRATOR_ANTIGRAVITY_EXPERIMENTAL",
+    fallback: "1",
+    description: "habilita Antigravity ACP (0|1)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_ANTIGRAVITY_ACP",
+    fallback: ".runtimes/antigravity",
+    description: "ejecutable ACP",
+  },
+  {
+    name: "PI_ORCHESTRATOR_ANTIGRAVITY_PROFILE",
+    fallback: ".runtimes/antigravity/profile",
+    description: "perfil privado",
+  },
+  {
+    name: "PI_ORCHESTRATOR_ANTIGRAVITY_READONLY_AUTO",
+    fallback: "1",
+    description: "autoaprobar comandos de solo lectura (0|1)",
+  },
+];
+
+/** Effective settings and their origin; read-only, never starts the service. */
+export function configurationReport(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  let validation = "Valores válidos.";
+  try {
+    runtimeConfiguration(env);
+  } catch (error) {
+    validation = `Configuración inválida: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  const rows = settingsRegistry.map(({ name, fallback, description }) => {
+    const raw = env[name]?.trim();
+    const value = raw
+      ? `${raw.length > 80 ? raw.slice(0, 77) + "…" : raw} (entorno)`
+      : `${fallback} (predeterminado)`;
+    return `${name.slice("PI_ORCHESTRATOR_".length)} = ${value} · ${description}`;
+  });
+  const unknown = Object.keys(env).filter(
+    (name) =>
+      name.startsWith("PI_ORCHESTRATOR_") &&
+      !settingsRegistry.some((setting) => setting.name === name),
+  );
+  return [
+    "Configuración del orquestador (prefijo PI_ORCHESTRATOR_)",
+    validation,
+    ...rows,
+    ...(unknown.length
+      ? [`Variables desconocidas, ignoradas: ${unknown.join(", ")}`]
+      : []),
+  ].join("\n");
 }

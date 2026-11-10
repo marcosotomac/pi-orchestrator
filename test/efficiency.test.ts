@@ -455,3 +455,147 @@ test("/orch ENGINE: prompt delegates directly, without a main-model turn", async
     await service?.close();
   }
 });
+
+test("a failure wakes the model early without waiting for slow siblings; the rest still arrives once", async () => {
+  let service: Service | undefined;
+  const tools = new Map<string, any>();
+  const sent: any[] = [];
+  const gates = new Map<string, (ok: boolean) => void>();
+  const fake = {
+    registerMessageRenderer() {},
+    on() {},
+    appendEntry() {},
+    sendUserMessage() {},
+    registerCommand() {},
+    sendMessage(message: any) {
+      sent.push(message);
+    },
+    registerTool(tool: any) {
+      tools.set(tool.name, tool);
+    },
+  } as unknown as ExtensionAPI;
+  createOrchestratorExtension(async (options) => {
+    service = await createService(options, {
+      codex: {
+        capabilities,
+        run: async (ctx) => {
+          const ok = await new Promise<boolean>((resolve, reject) => {
+            gates.set(ctx.prompt, resolve);
+            ctx.signal.addEventListener("abort", () =>
+              reject(ctx.signal.reason),
+            );
+          });
+          if (!ok) throw new Error("deliberate model failure");
+          return `answer for ${ctx.prompt}`;
+        },
+      },
+    });
+    return service;
+  })(fake);
+  const ctx = {
+    cwd: process.cwd(),
+    mode: "rpc",
+    ui: {},
+  } as unknown as ExtensionCommandContext;
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 400));
+  const delegate = async (prompt: string) =>
+    (
+      await tools
+        .get("orchestrator_delegate")
+        .execute(prompt, { engine: "codex", prompt }, undefined, undefined, ctx)
+    ).details as TaskView;
+  try {
+    const broken = await delegate("broken");
+    const slow = await delegate("slow");
+    while (gates.size < 2) await new Promise((r) => setTimeout(r, 5));
+    gates.get("broken")!(false);
+    await service!.core.wait(null, broken.id);
+    await settle();
+    assert.equal(sent.length, 1, "early wake while the sibling still runs");
+    assert.deepEqual(
+      sent[0].details.batch.map((task: TaskView) => task.id),
+      [broken.id],
+    );
+    assert.match(sent[0].content, /deliberate model failure/);
+    assert.match(sent[0].content, /1 sigue en curso/);
+    gates.get("slow")!(true);
+    await service!.core.wait(null, slow.id);
+    await settle();
+    assert.equal(sent.length, 2);
+    assert.deepEqual(
+      sent[1].details.batch.map((task: TaskView) => task.id),
+      [slow.id],
+      "the failed task is not delivered twice",
+    );
+    const { batchWakes, earlyFailureWakes } =
+      service!.core.usage().orchestration;
+    assert.deepEqual(
+      { batchWakes, earlyFailureWakes },
+      {
+        batchWakes: 1,
+        earlyFailureWakes: 1,
+      },
+    );
+  } finally {
+    await service?.close();
+  }
+});
+
+test("after a quota failure, delegating to the same engine warns the model; engines report the track record", async () => {
+  let service: Service | undefined;
+  const tools = new Map<string, any>();
+  const fake = {
+    registerMessageRenderer() {},
+    on() {},
+    appendEntry() {},
+    sendUserMessage() {},
+    registerCommand() {},
+    sendMessage() {},
+    registerTool(tool: any) {
+      tools.set(tool.name, tool);
+    },
+  } as unknown as ExtensionAPI;
+  createOrchestratorExtension(
+    async (options) => {
+      service = await createService(
+        { ...options, stateDirectory: undefined },
+        {
+          claude: {
+            capabilities,
+            run: async () => {
+              throw new Error("Claude usage quota exceeded for this account");
+            },
+          },
+          codex: { capabilities, run: async () => "fine" },
+        },
+      );
+      return service;
+    },
+    { stateDirectory: undefined },
+  )(fake);
+  const ctx = {
+    cwd: process.cwd(),
+    mode: "json",
+    ui: {},
+  } as unknown as ExtensionCommandContext;
+  const delegate = async (engine: string, prompt: string) =>
+    JSON.parse(
+      (
+        await tools
+          .get("orchestrator_delegate")
+          .execute(prompt, { engine, prompt }, undefined, undefined, ctx)
+      ).content[0].text,
+    );
+  try {
+    const first = await delegate("claude", "one");
+    assert.equal(first.warning, undefined, "no history yet");
+    const failed = await service!.core.wait(null, first.id ?? first.taskId);
+    assert.equal(failed.diagnostic?.category, "quota");
+    const second = await delegate("claude", "two");
+    assert.match(second.warning, /claude's latest task failed with quota/);
+    const other = await delegate("codex", "three");
+    assert.equal(other.warning, undefined, "other engines are unaffected");
+  } finally {
+    await service?.close();
+  }
+});

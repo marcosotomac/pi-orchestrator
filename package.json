@@ -27,11 +27,13 @@
     "test:tui": "python3 test/tui_harness_test.py && python3 scripts/tui-smoke.py",
     "bench:live": "tsx scripts/bench-live.ts",
     "verify": "npm run verify:offline && npm run test:tui",
-    "verify:live": "npm run verify && tsx scripts/live-matrix.ts"
+    "verify:live": "npm run verify && tsx scripts/live-matrix.ts",
+    "bench:scheduling": "tsx scripts/benchmark-scheduling.ts",
+    "bench:nested-live": "tsx scripts/bench-nested-live.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
-    "zod": "^4.0.0"
+    "zod": "4.6.7"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

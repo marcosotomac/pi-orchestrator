@@ -35,7 +35,7 @@ function sessionServer(
     "delegate",
     {
       description:
-        "Delegate a read-only task to another real runtime. Reuse requestKey for retries. Returns task id; use wait for the result. Parent executions count toward concurrency. Never delegate unless your assigned task permits it. Nested tasks are restricted; only the operator can authorize YOLO, and it is not inherited.",
+        "Delegate a read-only task to another real runtime. Reuse requestKey for retries. Returns task id; use wait for the result. Parent executions count toward concurrency; at full capacity your task may wait queued (state queued) or be refused if no slot could free. Your child must finish before your own wrap-up point, so its deadline may be shorter than yours. Never delegate unless your assigned task permits it. Nested tasks are restricted; only the operator can authorize YOLO, and it is not inherited.",
       inputSchema: {
         permissionMode: z.enum(["restricted", "yolo"]).optional(),
         model: z.string().min(1).max(128).optional(),
@@ -96,20 +96,32 @@ function sessionServer(
     "wait",
     {
       description:
-        "Block until a descendant settles or timeoutMs passes (default 300000 = 5 min, max 600000; Antigravity callers: default 30000, max 60000). Each call costs you a turn, so prefer the default over short polls. If still running, call again. A timeout is not task failure.",
+        "Block until descendants settle or timeoutMs passes (default 300000 = 5 min, max 600000; Antigravity callers: default 30000, max 60000). Pass taskIds to wait for several children in one call: each call costs you a turn, so prefer one call with all ids over separate waits or short polls. Returns one task for taskId, an array for taskIds. If any is still running, call again. A timeout is not task failure; it may return early near your own deadline so you can answer.",
       inputSchema: {
-        taskId: z.string(),
+        taskId: z.string().optional(),
+        taskIds: z.array(z.string()).min(1).max(16).optional(),
         timeoutMs: z.number().int().min(1).max(600_000).optional(),
       },
     },
     guarded(
-      ({ taskId, timeoutMs }: { taskId: string; timeoutMs?: number }, signal) =>
-        core.wait(
-          caller,
+      async (
+        {
           taskId,
+          taskIds,
+          timeoutMs,
+        }: { taskId?: string; taskIds?: string[]; timeoutMs?: number },
+        signal,
+      ) => {
+        const ids = [...(taskId ? [taskId] : []), ...(taskIds ?? [])];
+        if (!ids.length) throw new Error("Expected taskId or taskIds");
+        const views = await core.waitAll(
+          caller,
+          ids,
           timeoutMs ?? core.waitWindow(caller).defaultMs,
           signal,
-        ),
+        );
+        return taskIds ? views : views[0];
+      },
     ),
   );
   server.registerTool(

@@ -611,3 +611,60 @@ test("MCP authentication, browser protection, schema validation, ownership, and 
     await bridge.close();
   }
 });
+
+test("real MCP transport: one wait call collects several children (one turn, not N)", async () => {
+  let waitCalls = 0;
+  const run: RuntimeAdapter["run"] = async (ctx) => {
+    if (ctx.task.depth === 2) {
+      await delay(20 * Number(ctx.prompt.at(-1)));
+      return `proof-${ctx.prompt}`;
+    }
+    const client = await connect(ctx.mcp);
+    try {
+      const ids = [];
+      for (const n of [1, 2, 3])
+        ids.push(
+          unpack(
+            await client.callTool({
+              name: "delegate",
+              arguments: {
+                engine: "claude",
+                prompt: `child-${n}`,
+                requestKey: `k${n}`,
+              },
+            }),
+          ).id,
+        );
+      waitCalls++;
+      const views = unpack(
+        await client.callTool({ name: "wait", arguments: { taskIds: ids } }),
+      ) as TaskView[];
+      assert.deepEqual(
+        views.map((view) => view.state),
+        ["completed", "completed", "completed"],
+      );
+      const missing = await client.callTool({ name: "wait", arguments: {} });
+      assert.equal(missing.isError, true);
+      return views.map((view) => view.result).join(",");
+    } finally {
+      await client.close();
+    }
+  };
+  const core = new Orchestrator({
+    cwd: process.cwd(),
+    maxConcurrent: 4,
+    adapters: { codex: { capabilities, run }, claude: { capabilities, run } },
+  });
+  const bridge = await startMcpBridge(core);
+  try {
+    const task = core.delegate(null, "codex", "parent", "parent");
+    const done = await core.wait(null, task.id, 10_000);
+    assert.equal(done.result, "proof-child-1,proof-child-2,proof-child-3");
+    assert.equal(waitCalls, 1);
+    const metrics = core.usage().orchestration;
+    assert.equal(metrics.waitCalls, 1, "the parent's single call");
+    assert.equal(metrics.waitedTasks, 3);
+  } finally {
+    await bridge.close();
+  }
+});

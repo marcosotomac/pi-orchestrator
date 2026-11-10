@@ -35,11 +35,15 @@ import {
   formatInteractionDetail,
   helpText,
   yoloConfirmation,
+  orchestrationLines,
+  metricsWithDefaults,
+  engineRecordLines,
   type Attention,
 } from "./presentation.ts";
+import { engineRecords, sumMetrics } from "./insights.ts";
 import { createService } from "./service.ts";
 import { DeliveryLedger, modelTask } from "./model-view.ts";
-import { type HistoryPage, type RunRecord } from "./journal.ts";
+import { RunStore, type HistoryPage, type RunRecord } from "./journal.ts";
 import { productDefaults, runtimeConfiguration } from "./configuration.ts";
 import { detectAntigravity } from "./antigravity-installation.ts";
 import { reconcileRun, reconciliationWarning } from "./reconciliation.ts";
@@ -134,7 +138,7 @@ async function copyText(
 }
 
 const usage =
-  "/orch [panel] | start codex|claude|antigravity PROMPT | run codex|claude|antigravity PROMPT | status | result ID | cancel ID | apply ID | discard ID | reset | demo | history | inspect RUN | reconcile RUN | restart RUN TASK --accept-duplicate-risk PROMPT | engines | usage | capabilities TASK | steer TASK TEXT | resume TASK TEXT";
+  "/orch [panel] | start codex|claude|antigravity PROMPT | run codex|claude|antigravity PROMPT | status | result ID | cancel ID | apply ID | discard ID | reset | demo | history | inspect RUN | reconcile RUN | restart RUN TASK --accept-duplicate-risk PROMPT | engines | usage | config | capabilities TASK | steer TASK TEXT | resume TASK TEXT";
 const demoPrompt =
   "You must delegate exactly one task to the claude engine using the pi_orchestrator MCP delegate tool: compute 17 * 19 and explain in one sentence. Use requestKey 'arithmetic-review'. Wait for the task to complete with the MCP wait tool. Return its task id, status and answer. Do not solve it yourself or launch other workers.";
 
@@ -171,6 +175,8 @@ export function createOrchestratorExtension(
       details: data,
     });
     let coreRef: Awaited<ReturnType<typeof createService>>["core"] | undefined;
+    /** This session's own archive: excluded from history, counted live instead. */
+    let serviceRunId: string | undefined;
     // `continuable`: the model may follow up in the same native session (cheaper than a fresh task).
     const hints = (task: TaskView, view: Record<string, unknown>) => {
       try {
@@ -194,6 +200,9 @@ export function createOrchestratorExtension(
     /** Active orchestrator_wait calls per task: those results are delivered by the wait itself. */
     const waiting = new Map<string, number>();
     let flushTimer: ReturnType<typeof setTimeout> | undefined;
+    // PI_ORCHESTRATOR_EARLY_FAILURE_WAKE=0 restores one wake-up per finished batch only.
+    const earlyFailureWake =
+      process.env.PI_ORCHESTRATOR_EARLY_FAILURE_WAKE?.trim() !== "0";
     /**
      * One wake-up per batch: when no model-delegated root task is live, the
      * results the model has not received yet go out in a single message.
@@ -210,18 +219,46 @@ export function createOrchestratorExtension(
         if (task) batches.set(run, [...(batches.get(run) ?? []), task]);
       }
       const pending: TaskView[] = [];
+      const early: TaskView[] = [];
+      let stillRunning = 0;
+      const undelivered = (task: TaskView) =>
+        !waiting.has(task.id) && !ledger.has(task.id);
       for (const batch of batches.values()) {
-        if (batch.some((task) => !isTerminal(task))) continue;
-        pending.push(
-          ...batch.filter(
-            (task) => !waiting.has(task.id) && !ledger.has(task.id),
-          ),
-        );
+        const live = batch.filter((task) => !isTerminal(task)).length;
+        if (live) {
+          // A failure is actionable now (re-delegate, change engine): do not hold it
+          // behind slow siblings. Cancellations are usually the operator's own doing.
+          if (!earlyFailureWake) continue;
+          const failed = batch.filter(
+            (task) => task.state === "failed" && undelivered(task),
+          );
+          if (failed.length) {
+            early.push(...failed);
+            stillRunning += live;
+          }
+          continue;
+        }
+        pending.push(...batch.filter(undelivered));
         for (const task of batch)
           if (!waiting.has(task.id)) toolTasks.delete(task.id);
       }
-      if (!pending.length || !deferred()) return;
+      if (!deferred()) return;
+      if (early.length) {
+        for (const task of early) ledger.mark(task.id);
+        coreRef?.noteWake("earlyFailure");
+        pi.sendMessage(
+          {
+            customType: "orchestrator",
+            display: true,
+            details: { batch: early },
+            content: `[Orquestador] ${early.length === 1 ? "Falló 1 tarea" : `Fallaron ${early.length} tareas`} del lote que delegaste; ${stillRunning} sigue${stillRunning === 1 ? "" : "n"} en curso y llegará${stillRunning === 1 ? "" : "n"} en otro mensaje. Resultados (cada uno se entrega una sola vez):\n${JSON.stringify(early.map((task) => modelTask(task, "include")))}\nDecide ya si re-delegar o informar; no esperes las tareas en curso.`,
+          },
+          { triggerTurn: true, deliverAs: "followUp" },
+        );
+      }
+      if (!pending.length) return;
       for (const task of pending) ledger.mark(task.id);
+      coreRef?.noteWake("batch");
       const failed = pending.filter(
         (task) => task.state !== "completed",
       ).length;
@@ -535,6 +572,7 @@ export function createOrchestratorExtension(
       })
         .then((created) => {
           coreRef = created.core;
+          serviceRunId = created.journal?.runId;
           return created;
         })
         .catch((error) => {
@@ -640,6 +678,7 @@ export function createOrchestratorExtension(
             archive?: RunRecord;
             reconciliation?: ReturnType<typeof reconcileRun>;
             installation?: ReturnType<typeof detectAntigravity>;
+            trackRecord?: ReturnType<typeof engineRecords>;
           }
         | TaskView[]
         | TaskView
@@ -708,11 +747,22 @@ export function createOrchestratorExtension(
           current: "sesión actual",
           unreconciled: "sin reconciliar; podría seguir activo en otra sesión",
         };
+        const measured = data.history.runs.filter((run) => run.metrics);
         text = [
           "Historial persistido · solo lectura",
+          ...(measured.length
+            ? [
+                `Tendencia de ${measured.length} ${measured.length === 1 ? "run medido" : "runs medidos"} (suma; espera máxima global):`,
+                ...orchestrationLines(
+                  metricsWithDefaults(
+                    sumMetrics(measured.map((run) => run.metrics)),
+                  ),
+                ).slice(1),
+              ]
+            : []),
           ...data.history.runs.map(
             (run) =>
-              `${run.runId} · ${labels[run.disposition]} · ${run.tasks} tareas\n${run.cwd}`,
+              `${run.runId} · ${labels[run.disposition]} · ${run.tasks} tareas (${run.completed} completadas, ${run.failed} fallidas, ${run.cancelled} canceladas)\n${run.cwd}`,
           ),
           ...(data.history.unavailable.length
             ? [
@@ -772,7 +822,10 @@ export function createOrchestratorExtension(
         "installation" in data &&
         data.installation
       ) {
-        text = `Antigravity: ${data.installation.status}\nACP: ${data.installation.executable ?? "no localizado"}\nNo se inició ningún servicio ni runtime. La presencia del binario no acredita autenticación ni compatibilidad.`;
+        text = [
+          ...engineRecordLines(data.trackRecord),
+          `Antigravity: ${data.installation.status}\nACP: ${data.installation.executable ?? "no localizado"}\nNo se inició ningún servicio ni runtime. La presencia del binario no acredita autenticación ni compatibilidad.`,
+        ].join("\n");
       } else if (Array.isArray(data))
         text = [
           summary(data),
@@ -883,9 +936,31 @@ export function createOrchestratorExtension(
       };
     });
 
+    // Track record per engine: archived runs (other sessions, read from disk at most
+    // every 5 min; measured 16 ms for 20 runs) plus this session from memory, so a
+    // fresh outcome counts at once without blocking the TUI on disk reads.
+    let archived: { at: number; tasks: TaskView[] } | undefined;
+    const trackRecord = () => {
+      const current = coreRef?.list() ?? [];
+      if (!stateDirectory) return engineRecords(current);
+      if (!archived || Date.now() - archived.at > 300_000) {
+        let tasks: TaskView[] = [];
+        try {
+          tasks = new RunStore(stateDirectory).recentTasks(
+            20,
+            serviceRunId,
+          ) as TaskView[];
+        } catch {
+          /* history is advisory; this session still counts */
+        }
+        archived = { at: Date.now(), tasks };
+      }
+      return engineRecords([...archived.tasks, ...current]);
+    };
     registerOrchestratorTools(pi, {
       get,
       reply,
+      trackRecord,
       once,
       deferred,
       isolationEnabled,
@@ -1033,6 +1108,7 @@ export function createOrchestratorExtension(
       tasks,
       stateDirectory,
       demoPrompt,
+      trackRecord: () => trackRecord(),
       async reset(ctx) {
         const previous = service;
         service = undefined;

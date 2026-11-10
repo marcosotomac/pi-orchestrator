@@ -7,6 +7,8 @@ import {
   type TaskView,
 } from "./types.ts";
 import type { IsolationPreview } from "./workspace.ts";
+import type { OrchestrationMetrics } from "./orchestrator.ts";
+import type { EngineRecord } from "./insights.ts";
 
 /** Provider output is untrusted terminal data: no OSC links, escapes, or control bytes. */
 export function safeText(text: string): string {
@@ -300,6 +302,9 @@ const short = (ms: number) => {
       : `${Math.floor(s / 3_600)}h ${Math.floor((s % 3_600) / 60)}m`;
 };
 
+/** A running task this close to its hard deadline shows the time left. */
+export const DEADLINE_WARNING_MS = 120_000;
+
 /** Host facts first (children, stall), then the engine's own reported action. */
 export function taskDetail(
   task: TaskView,
@@ -311,6 +316,15 @@ export function taskDetail(
   // The orchestrator's own action (soft deadline) is a host fact, not an engine report.
   if (task.lastActivity?.startsWith("orchestrator: "))
     return { text: task.lastActivity.slice(14), tone: "warning" };
+  // Warn before the cut, not after: the operator can still steer or wait.
+  if (task.deadlineAt) {
+    const left = Date.parse(task.deadlineAt) - now;
+    if (left <= DEADLINE_WARNING_MS)
+      return {
+        text: `${left > 0 ? `quedan ${short(left)} de plazo` : "plazo agotado"}${task.deadlineBounded ? " (acotado al de su padre)" : ""}`,
+        tone: "warning",
+      };
+  }
   const live = tasks.filter(
     (child) => child.parentId === task.id && !isTerminal(child),
   );
@@ -330,6 +344,14 @@ export function taskDetail(
     };
   const action = activityLabel(task.lastActivity);
   return { text: action ? `motor: ${action}` : undefined, tone: "muted" };
+}
+
+export function fullEngineName(engine: TaskView["engine"]): string {
+  return engine === "codex"
+    ? "Codex"
+    : engine === "claude"
+      ? "Claude"
+      : "Antigravity";
 }
 
 export function engineName(engine: TaskView["engine"]): string {
@@ -408,11 +430,10 @@ export function modelLabel(task: TaskView): string {
   }
   return safeText(
     [
-      task.engine === "codex"
-        ? "Codex"
-        : task.engine === "claude"
-          ? "Claude"
-          : "Antigravity",
+      fullEngineName(task.engine),
+      task.fallbackFrom
+        ? `en lugar de ${fullEngineName(task.fallbackFrom)}, que falló por cuota o sesión`
+        : undefined,
       model ? modelName(model) : "modelo por defecto",
       thinking
         ? `razonamiento ${thinkingName(thinking)}${defaulted ? " (por defecto)" : ""}`
@@ -907,13 +928,11 @@ export function helpText(advanced: string): string {
     "YOLO en un repositorio git con commits: la tarea escribe en un worktree aislado (no es un sandbox; Antigravity no tiene sandbox);",
     "  tú revisas el diff y lo aplicas (a o /orch apply ID) o lo descartas (x o /orch discard ID).",
     "",
-    "Comandos: status · result ID · cancel ID · apply ID · discard ID · usage · engines · history · reset",
+    "Comandos: status · result ID · cancel ID · apply ID · discard ID · usage · config · engines · history · reset",
     "Avanzado:",
     `  ${advanced.split(" | ").join("\n  ")}`,
     "",
-    "Variables: PI_ORCHESTRATOR_TASK_TIMEOUT_MS · PI_ORCHESTRATOR_CODEX_DEFAULT_THINKING ·",
-    "  PI_ORCHESTRATOR_CLAUDE_MAX_TURNS · PI_ORCHESTRATOR_MAX_TASKS · PI_ORCHESTRATOR_NOTIFY (desktop|bell|off) ·",
-    "  PI_ORCHESTRATOR_ALLOWED_ROOTS · PI_ORCHESTRATOR_YOLO_SANDBOX (on|off) · PI_ORCHESTRATOR_STATE_DIR (ruta|off)",
+    "Variables PI_ORCHESTRATOR_*: /orch config muestra todas, su valor efectivo y su origen.",
   ].join("\n");
 }
 
@@ -930,6 +949,7 @@ export function usageReport(
         maxTokens?: number;
         maxCostUsd?: number;
         spend?: { tokens: number; costUsd: number; estimatedTokens?: number };
+        orchestration?: OrchestrationMetrics;
       }
     | undefined,
   tasks: TaskView[],
@@ -995,6 +1015,109 @@ export function usageReport(
     lines.push(
       `Estimación de entrada sin contador (${estimated.length} ${estimated.length === 1 ? "tarea" : "tareas"}, sobre todo Antigravity): ≥${estimated.reduce((sum, task) => sum + (task.context!.peak ?? task.context!.used), 0).toLocaleString("es")} tokens, cota inferior por el contexto máximo.`,
     );
+  if (usage?.orchestration)
+    lines.push(...orchestrationLines(usage.orchestration));
   lines.push("No es una factura: son los contadores que informa cada motor.");
   return lines.join("\n");
 }
+
+/** Counters from older archives may lack newer metrics: they count as zero. */
+export function metricsWithDefaults(
+  partial: Record<string, number>,
+): OrchestrationMetrics {
+  const zero: OrchestrationMetrics = {
+    boundedExpiries: 0,
+    waitClamps: 0,
+    childQueued: 0,
+    nestedRejected: 0,
+    queueDispatches: 0,
+    queueWaitMsTotal: 0,
+    queueWaitMsMax: 0,
+    waitCalls: 0,
+    waitedTasks: 0,
+    batchWakes: 0,
+    earlyFailureWakes: 0,
+    spendAborts: 0,
+    queueExpired: 0,
+    fallbacks: 0,
+  };
+  for (const key of Object.keys(zero) as (keyof OrchestrationMetrics)[])
+    if (typeof partial[key] === "number") zero[key] = partial[key];
+  return zero;
+}
+
+/** Scheduling counters, so each decision can be measured in real sessions and tuned. */
+export function orchestrationLines(metrics: OrchestrationMetrics): string[] {
+  const m = metrics;
+  const span = (ms: number) => (ms < 1_000 ? `${ms} ms` : short(ms));
+  const average = m.queueDispatches
+    ? Math.round(m.queueWaitMsTotal / m.queueDispatches)
+    : 0;
+  return [
+    "Orquestación:",
+    `  Cola: ${m.queueDispatches} esperaron una plaza (media ${span(average)}, máx. ${span(m.queueWaitMsMax)}) · ${m.childQueued} subtareas en cola · ${m.nestedRejected} subtareas rechazadas · ${m.queueExpired} caducadas en cola`,
+    `  Plazos: ${m.boundedExpiries} subtareas cortadas por el plazo del padre · ${m.waitClamps} esperas anidadas acortadas`,
+    `  Esperas: ${m.waitCalls} llamadas para ${m.waitedTasks} tareas${m.waitCalls ? ` (${(m.waitedTasks / m.waitCalls).toFixed(1)} por llamada)` : ""}`,
+    `  Despertares del modelo: ${m.batchWakes} por lote terminado · ${m.earlyFailureWakes} anticipados por fallo${m.spendAborts ? ` · ${m.spendAborts} cancelaciones por tope de gasto` : ""}`,
+    ...(m.fallbacks
+      ? [`  Cambios de motor por cuota o autenticación: ${m.fallbacks}`]
+      : []),
+  ];
+}
+
+/** Operator view of each engine's recent outcomes; history, not a guarantee. */
+export function engineRecordLines(
+  records: Partial<Record<TaskView["engine"], EngineRecord>> | undefined,
+): string[] {
+  const engines = (["claude", "codex", "antigravity"] as const).filter(
+    (engine) => records?.[engine],
+  );
+  if (!engines.length)
+    return ["Historial por motor: aún no hay tareas terminadas."];
+  return [
+    "Historial reciente por motor:",
+    ...engines.map((engine) => {
+      const record = records![engine]!;
+      const failures = Object.entries(record.failures)
+        .map(([category, count]) => `${count} ${categoryName(category)}`)
+        .join(", ");
+      return safeText(
+        [
+          `  ${fullEngineName(engine)}: ${record.completed}/${record.tasks} completadas`,
+          record.failed ? `${record.failed} fallidas (${failures})` : undefined,
+          record.medianMs !== undefined
+            ? `mediana ${short(record.medianMs)}`
+            : undefined,
+          record.medianTokens !== undefined
+            ? `${formatTokenCount(record.medianTokens)} tokens`
+            : undefined,
+          record.blocked
+            ? `⚠ bloqueado: último fallo por ${categoryName(record.blocked.category)}`
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      );
+    }),
+  ];
+}
+
+const categoryName = (category: string): string =>
+  (
+    ({
+      quota: "cuota",
+      authentication: "sesión/autenticación",
+      network: "red",
+      transient: "error temporal del proveedor",
+      protocol: "protocolo",
+      cleanup: "limpieza",
+      unknown: "otros",
+    }) as Record<string, string>
+  )[category] ?? category;
+
+const formatTokenCount = (n: number): string =>
+  n >= 1_000_000
+    ? `${(n / 1_000_000).toFixed(1)}M`
+    : n >= 1_000
+      ? `${Math.round(n / 1_000)}k`
+      : String(n);
