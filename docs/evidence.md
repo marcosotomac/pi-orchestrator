@@ -163,3 +163,17 @@ Sin variables se conservan los modelos predeterminados de cada runtime. Codex re
 - **Comandos de solo lectura en Antigravity restricted** (`src/readonly-commands.ts`). Medido en vivo (1.4.5): leer, listar y buscar no piden permiso; solo `execute`, con `rawInput.CommandLine`. Una lista blanca (ls, du, ps, git log/status/diff, find sin `-exec`/`-delete`, docker/brew/npm de consulta…) se aprueba `allow_once` sin humano; lo demás sigue pidiendo aprobación. Rechaza `;`, `&&`, `||`, redirección a archivo, `$`, backticks y escapes; tuberías solo entre comandos permitidos. Nada que use la red recibe un destino elegido por el modelo: `npm view`/`npm outdated`/`pnpm outdated` y `git remote show` piden aprobación, y cualquier URL o `--registry`/`--userconfig` en npm, pnpm, git o brew también (evita sacar datos dentro de una URL). Sonda real, mismo prompt (tres comandos), Flash low: **diálogos humanos 3 → 0, duración 44 s → 31 s**, workspace intacto en ambas. Tests: 47 comandos de inspección permitidos y 78 de escritura, ejecución o red denegados. Desactivar: `PI_ORCHESTRATOR_ANTIGRAVITY_READONLY_AUTO=0`.
 - **Links `file://` → `ruta:línea`** (`src/result-links.ts`), antes de truncar. Sobre los 27 resultados del historial: **176 links → 0**, 187.445 → 176.829 caracteres (−5,7 % total; −9,0 % en los 10 resultados con links; unos 3.000 tokens). Los links apuntaban a worktrees ya borrados.
 - **Estimación de tokens de Antigravity**: sin contador propio, cuenta el pico de contexto (`context.peak`), una cota inferior de la entrada facturada. El tope `PI_ORCHESTRATOR_MAX_TOKENS` deja de ignorarlas. Cobertura del historial: tareas con medición **8/31 → 28/31**.
+
+### Planificación con anidamiento (2026-11-09)
+
+`npm run bench:scheduling -- RAÍCES HIJOS` (sintético, sin agentes ni cuota): cola justa, 8 plazas, cada raíz delega N hijos y los espera con una sola llamada.
+
+| Raíces × 3 hijos | `main` | Rama, antes de optimizar | Rama, final |
+| --- | --- | --- | --- |
+| 100 | 98 de 104 completadas; 296 hijos rechazados | 400/400 · 0,057 ms/tarea | 400/400 · 0,047 ms/tarea |
+| 300 | 298 de 302; 898 rechazados | 1.200/1.200 · 0,059 ms/tarea | 1.200/1.200 · 0,029 ms/tarea |
+| 1.000 | 998 de 1.004; 2.996 rechazados | 4.000/4.000 · 0,150 ms/tarea | 4.000/4.000 · 0,025 ms/tarea |
+
+En `main` casi todos los hijos se rechazaban por falta de plaza; con la cola de hijos terminan todos. El perfil de CPU mostró que `spend()` consumía ~78 % del tiempo (se recorría en cada admisión aunque no hubiera topes); tras quitarlo y hacer incremental la comprobación de deadlock, el coste por tarea es constante. Son ejecuciones locales únicas en un Mac, no garantías de throughput.
+
+`trackRecord` con 20 runs × 30 tareas: 13–16 ms leyendo de disco en cada llamada → 0,42 ms con el historial de otros runs en caché (5 min) y la sesión actual en memoria.
