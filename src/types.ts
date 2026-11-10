@@ -53,6 +53,8 @@ export interface TaskUsage {
 }
 
 export interface TaskView {
+  /** Engine whose quota/authentication failure made this task rerun on `engine`. */
+  fallbackFrom?: Engine;
   id: string;
   title: string;
   attemptId: string;

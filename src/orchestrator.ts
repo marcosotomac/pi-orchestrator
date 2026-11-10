@@ -115,6 +115,8 @@ export interface OrchestrationMetrics {
   spendAborts: number;
   /** Queued tasks cancelled by maxQueueWaitMs before launching. */
   queueExpired: number;
+  /** Tasks rerun on their fallback engine after a quota or authentication failure. */
+  fallbacks: number;
 }
 
 export interface OrchestratorOptions {
@@ -145,6 +147,8 @@ export interface OrchestratorOptions {
   spendEnforcement?: "admission" | "abort";
   /** A queued task still waiting after this long is cancelled without launching. Unset: no limit. */
   maxQueueWaitMs?: number;
+  /** Operator policy: a quota/authentication failure reruns once on this engine, under retry safety rules. */
+  fallback?: Partial<Record<Engine, Engine>>;
   /** Delay before the single automatic retry of a transient/network failure. */
   retryDelayMs?: number;
   /** Extra directories (besides cwd) an operator task may run in; subdirectories included. */
@@ -184,6 +188,7 @@ export class Orchestrator {
     earlyFailureWakes: 0,
     spendAborts: 0,
     queueExpired: 0,
+    fallbacks: 0,
   };
   /** Children waiting for a slot; dispatched before roots (their ancestors hold slots). */
   private childQueue: string[] = [];
@@ -342,6 +347,24 @@ export class Orchestrator {
     );
   }
 
+  /** Product default < environment < explicit request. */
+  private selectionFor(
+    engine: Engine,
+    requested?: ModelSelection,
+  ): ModelSelection {
+    const prefix = `PI_ORCHESTRATOR_${engine.toUpperCase()}`;
+    return validateSelection({
+      ...this.options.defaultSelection?.[engine],
+      ...(process.env[`${prefix}_MODEL`]
+        ? { model: process.env[`${prefix}_MODEL`] }
+        : {}),
+      ...(process.env[`${prefix}_THINKING`]
+        ? { thinking: process.env[`${prefix}_THINKING`] }
+        : {}),
+      ...requested,
+    });
+  }
+
   /** An operator-chosen directory: real, a directory, and inside cwd or an allowed root. */
   private placement(requested: string | undefined): string {
     if (requested === undefined) return this.cwd;
@@ -458,18 +481,7 @@ export class Orchestrator {
       throw new Error(
         "Only the operator may authorize YOLO; nested tasks cannot escalate permissions",
       );
-    const prefix = `PI_ORCHESTRATOR_${engine.toUpperCase()}`;
-    // Product default < environment < explicit request.
-    const selection = validateSelection({
-      ...this.options.defaultSelection?.[engine],
-      ...(process.env[`${prefix}_MODEL`]
-        ? { model: process.env[`${prefix}_MODEL`] }
-        : {}),
-      ...(process.env[`${prefix}_THINKING`]
-        ? { thinking: process.env[`${prefix}_THINKING`] }
-        : {}),
-      ...requestedSelection,
-    });
+    const selection = this.selectionFor(engine, requestedSelection);
     if (
       engine === "claude" &&
       selection.thinking &&
@@ -867,6 +879,24 @@ export class Orchestrator {
       try {
         return await runOnce();
       } catch (error) {
+        const fallback = this.fallbackFor(entry, error);
+        if (fallback) {
+          const from = entry.view.engine;
+          entry.view.fallbackFrom = from;
+          entry.view.engine = fallback;
+          // The failed engine's model and effort mean nothing to the other one.
+          entry.view.selection = this.selectionFor(fallback);
+          delete entry.view.modelState;
+          delete entry.view.runtimeSessionId;
+          delete entry.view.runtimeProcess;
+          if (entry.view.usage) entry.usageCarry = { ...entry.view.usage };
+          this.metrics.fallbacks++;
+          entry.view.lastActivity = `orchestrator: ${from} sin ${diagnoseFailure(error).category === "quota" ? "cuota" : "autenticación"}; se repite en ${fallback}`;
+          entry.view.activityAt = new Date().toISOString();
+          this.emit("activity", entry, entry.view.lastActivity);
+          attempt = 0; // the fallback engine gets its own transient retry
+          continue;
+        }
         if (attempt > 1 || !this.retryable(entry, error)) throw error;
         if (entry.view.usage) entry.usageCarry = { ...entry.view.usage };
         entry.view.lastActivity = `orchestrator: error transitorio (${diagnoseFailure(error).category}); reintento automático`;
@@ -1163,6 +1193,30 @@ export class Orchestrator {
 
   /** One automatic retry is safe only when repeating cannot duplicate side effects. */
   private retryable(entry: Entry, error: unknown): boolean {
+    return (
+      this.repeatSafe(entry, error) && diagnoseFailure(error).automaticRetry
+    );
+  }
+
+  /** Configured fallback engine for a quota/auth failure, at most one hop per task. */
+  private fallbackFor(entry: Entry, error: unknown): Engine | undefined {
+    const target = this.options.fallback?.[entry.view.engine];
+    if (
+      !target ||
+      target === entry.view.engine ||
+      entry.view.fallbackFrom ||
+      !this.options.adapters[target] ||
+      !this.repeatSafe(entry, error)
+    )
+      return undefined;
+    const { category } = diagnoseFailure(error);
+    return category === "quota" || category === "authentication"
+      ? target
+      : undefined;
+  }
+
+  /** Repeating the attempt cannot duplicate side effects. */
+  private repeatSafe(entry: Entry, error: unknown): boolean {
     if (
       entry.controller.signal.aborted ||
       this.closing ||
@@ -1178,7 +1232,7 @@ export class Orchestrator {
     if ((this.children.get(entry.view.id)?.size ?? 0) > 0) return false; // children would be duplicated
     if (entry.view.runtimeProcess && !entry.view.runtimeProcess.exitedAt)
       return false;
-    return diagnoseFailure(error).automaticRetry;
+    return true;
   }
 
   /** Operator only: applies a settled YOLO root's reviewed patch to the operator's tree. */

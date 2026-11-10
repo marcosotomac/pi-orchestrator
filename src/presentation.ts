@@ -1019,6 +1019,7 @@ export function metricsWithDefaults(
     earlyFailureWakes: 0,
     spendAborts: 0,
     queueExpired: 0,
+    fallbacks: 0,
   };
   for (const key of Object.keys(zero) as (keyof OrchestrationMetrics)[])
     if (typeof partial[key] === "number") zero[key] = partial[key];
@@ -1038,5 +1039,8 @@ export function orchestrationLines(metrics: OrchestrationMetrics): string[] {
     `  Plazos: ${m.boundedExpiries} subtareas cortadas por el plazo del padre · ${m.waitClamps} esperas anidadas acortadas`,
     `  Esperas: ${m.waitCalls} llamadas para ${m.waitedTasks} tareas${m.waitCalls ? ` (${(m.waitedTasks / m.waitCalls).toFixed(1)} por llamada)` : ""}`,
     `  Despertares del modelo: ${m.batchWakes} por lote terminado · ${m.earlyFailureWakes} anticipados por fallo${m.spendAborts ? ` · ${m.spendAborts} cancelaciones por tope de gasto` : ""}`,
+    ...(m.fallbacks
+      ? [`  Cambios de motor por cuota o autenticación: ${m.fallbacks}`]
+      : []),
   ];
 }

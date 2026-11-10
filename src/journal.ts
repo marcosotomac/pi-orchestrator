@@ -27,6 +27,7 @@ const taskSchema = z
     attemptId: id,
     parentId: id.nullable(),
     engine: z.enum(["codex", "claude", "antigravity"]),
+    fallbackFrom: z.enum(["codex", "claude", "antigravity"]).optional(),
     depth: z.number().int().min(1).max(256),
     cwd: z.string().min(1).max(8_192),
     state: z.enum([

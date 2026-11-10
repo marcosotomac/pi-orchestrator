@@ -321,3 +321,73 @@ test("/orch usage reports every orchestration counter", async () => {
     await core.close();
   }
 });
+
+const outOfQuota = async () => {
+  throw new Error("Claude usage quota exceeded for this account");
+};
+
+test("engine fallback reruns a quota failure once on the configured engine", async () => {
+  const prompts: string[] = [];
+  const core = make({
+    fallback: { claude: "codex" },
+    retryDelayMs: 1,
+    child: outOfQuota,
+    run: async (ctx) => {
+      prompts.push(
+        `${ctx.task.engine}:${ctx.prompt}:${ctx.task.selection?.model ?? "-"}`,
+      );
+      return "codex answer";
+    },
+  });
+  try {
+    const task = core.delegate(null, "claude", "review", "k", undefined, {
+      model: "opus",
+    });
+    const done = await core.wait(null, task.id, 2_000);
+    assert.equal(done.state, "completed", done.error);
+    assert.equal(done.engine, "codex");
+    assert.equal(done.fallbackFrom, "claude");
+    assert.equal(done.result, "codex answer");
+    assert.deepEqual(
+      prompts,
+      ["codex:review:-"],
+      "the Claude model is not carried over",
+    );
+    assert.equal(core.usage().orchestration.fallbacks, 1);
+  } finally {
+    await core.close();
+  }
+});
+
+test("engine fallback is off by default, never for YOLO, and never twice", async () => {
+  const none = make({ child: outOfQuota });
+  const yolo = make({ fallback: { claude: "codex" }, child: outOfQuota });
+  const loop = make({
+    fallback: { claude: "codex", codex: "claude" },
+    child: outOfQuota,
+    run: outOfQuota,
+  });
+  try {
+    const plain = none.delegate(null, "claude", "a", "a");
+    assert.equal((await none.wait(null, plain.id, 2_000)).state, "failed");
+    const risky = yolo.delegate(
+      null,
+      "claude",
+      "b",
+      "b",
+      undefined,
+      undefined,
+      "yolo",
+    );
+    const settled = await yolo.wait(null, risky.id, 2_000);
+    assert.equal(settled.state, "failed");
+    assert.equal(settled.engine, "claude");
+    const twice = loop.delegate(null, "claude", "c", "c");
+    const last = await loop.wait(null, twice.id, 2_000);
+    assert.equal(last.state, "failed");
+    assert.equal(last.engine, "codex", "one hop only");
+    assert.equal(loop.usage().orchestration.fallbacks, 1);
+  } finally {
+    await Promise.all([none.close(), yolo.close(), loop.close()]);
+  }
+});

@@ -81,6 +81,28 @@ export function runtimeConfiguration(
       );
     options.isolateWrites = env.PI_ORCHESTRATOR_ISOLATE_WRITES === "1";
   }
+  if (env.PI_ORCHESTRATOR_FALLBACK !== undefined) {
+    // "claude:codex,codex:claude": on quota/auth failure, rerun once on the target.
+    const engines = ["codex", "claude", "antigravity"];
+    const fallback: Record<string, string> = {};
+    for (const pair of env.PI_ORCHESTRATOR_FALLBACK.split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)) {
+      const [from, to, extra] = pair.split(":");
+      if (
+        extra !== undefined ||
+        !engines.includes(from ?? "") ||
+        !engines.includes(to ?? "") ||
+        from === to ||
+        fallback[from!]
+      )
+        throw new Error(
+          "Invalid PI_ORCHESTRATOR_FALLBACK (expected engine:engine pairs, e.g. claude:codex,codex:claude)",
+        );
+      fallback[from!] = to!;
+    }
+    options.fallback = fallback as OrchestratorOptions["fallback"];
+  }
   if (env.PI_ORCHESTRATOR_SPEND_ENFORCEMENT !== undefined) {
     if (!["admission", "abort"].includes(env.PI_ORCHESTRATOR_SPEND_ENFORCEMENT))
       throw new Error(
@@ -163,6 +185,11 @@ export const settingsRegistry: readonly {
     name: "PI_ORCHESTRATOR_MAX_COST_USD",
     fallback: "sin límite",
     description: "tope en USD de la sesión (solo Claude informa dólares)",
+  },
+  {
+    name: "PI_ORCHESTRATOR_FALLBACK",
+    fallback: "ninguno",
+    description: "motor alternativo ante cuota/autenticación (claude:codex,…)",
   },
   {
     name: "PI_ORCHESTRATOR_SPEND_ENFORCEMENT",

@@ -44,3 +44,25 @@ test("the report shows origin, flags invalid values and unknown names", () => {
   assert.match(report, /desconocidas, ignoradas: PI_ORCHESTRATOR_TYPO/);
   assert.match(configurationReport({}), /Valores válidos\./);
 });
+
+test("fallback pairs parse strictly", async () => {
+  const { runtimeConfiguration } = await import("../src/configuration.ts");
+  assert.deepEqual(
+    runtimeConfiguration({
+      PI_ORCHESTRATOR_FALLBACK: "claude:codex, codex:claude",
+    }).fallback,
+    { claude: "codex", codex: "claude" },
+  );
+  for (const bad of [
+    "claude",
+    "claude:claude",
+    "claude:gpt",
+    "a:b:c",
+    "claude:codex,claude:antigravity",
+  ])
+    assert.throws(
+      () => runtimeConfiguration({ PI_ORCHESTRATOR_FALLBACK: bad }),
+      /PI_ORCHESTRATOR_FALLBACK/,
+      bad,
+    );
+});
