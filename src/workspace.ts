@@ -37,7 +37,10 @@ function git(args: string[], cwd: string, input?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("git", args, {
       cwd,
-      stdio: ["pipe", "pipe", "pipe"],
+      // No input: no stdin pipe. Commands that never read it (rev-parse) exit
+      // first, and writing to the closed pipe raised EPIPE on Linux, turning a
+      // successful query into a failure (YOLO isolation silently fell back in-place).
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       env: {
         ...process.env,
         GIT_TERMINAL_PROMPT: "0",
@@ -50,16 +53,16 @@ function git(args: string[], cwd: string, input?: string): Promise<string> {
     let inputError: Error | undefined;
     // Git can exit before consuming stdin. Stream errors are separate from
     // child-process errors; wait for close to preserve Git's stderr on failure.
-    child.stdin.on("error", (error: Error) => {
+    child.stdin?.on("error", (error: Error) => {
       inputError = error;
     });
     const timer = setTimeout(() => child.kill("SIGKILL"), 120_000);
-    child.stdout.on("data", (chunk: Buffer) => {
+    child.stdout!.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > 64 * 1_024 * 1_024) child.kill("SIGKILL");
       else out.push(chunk);
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr!.on("data", (chunk: Buffer) => {
       if (err.length < 64) err.push(chunk);
     });
     child.on("error", (error) => {
@@ -78,7 +81,7 @@ function git(args: string[], cwd: string, input?: string): Promise<string> {
           ),
         );
     });
-    child.stdin.end(input ?? "");
+    child.stdin?.end(input);
   });
 }
 
