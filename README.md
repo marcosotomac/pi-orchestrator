@@ -4,7 +4,7 @@ Orquestación de **runtimes reales** de Codex y Claude Code desde Pi, con delega
 
 ## Estado
 
-Prototipo experimental con 263 pruebas locales (`npm test`, sin cuota) y matrices reales probadas en las direcciones Pi → Codex ⇄ Claude ⇄ Antigravity: delegación anidada, cancelación del árbol completo, elección de herramientas por el modelo principal de Pi y persistencia opcional. No es un sistema de producción.
+Prototipo experimental con 275 pruebas locales (`npm test`, sin cuota) y matrices reales probadas en las direcciones Pi → Codex ⇄ Claude ⇄ Antigravity: delegación anidada, cancelación del árbol completo, elección de herramientas por el modelo principal de Pi y persistencia opcional. No es un sistema de producción.
 
 Documentación detallada:
 
@@ -28,7 +28,7 @@ npm run check
 npm test
 ```
 
-La suite contiene 263 pruebas locales; última ejecución paralela completa: 263/263. Los anteriores fallos de deadline/censo motivaron watchdogs de fixtures adecuados para contención y reintentos acotados del censo desconocido, sin cambiar garantías de producción. Véase [RELIABILITY.md](RELIABILITY.md). `npm test` y usa motores simulados y procesos Node: **no ejecuta agentes reales ni consume sus cuotas**. La comprobación TypeScript y `npm audit --omit=dev` también pasaron (sin vulnerabilidades notificadas en dependencias de producción).
+La suite contiene 275 pruebas locales; última ejecución paralela completa: 275/275. Los anteriores fallos de deadline/censo motivaron watchdogs de fixtures adecuados para contención y reintentos acotados del censo desconocido, sin cambiar garantías de producción. Véase [RELIABILITY.md](RELIABILITY.md). `npm test` y usa motores simulados y procesos Node: **no ejecuta agentes reales ni consume sus cuotas**. La comprobación TypeScript y `npm audit --omit=dev` también pasaron (sin vulnerabilidades notificadas en dependencias de producción).
 
 ## Usar desde Pi, sin instalación global
 
