@@ -354,10 +354,12 @@ export class RunStore {
     }
   }
   /** Tasks of the most recently modified valid runs, for track records. Read-only, bounded. */
-  recentTasks(limit = 20): RunRecord["tasks"] {
+  recentTasks(limit = 20, excludeRunId?: string): RunRecord["tasks"] {
     if (!this.checkRoot(false)) return [];
     const names = readdirSync(this.directory)
-      .filter((name) => archiveName.test(name))
+      .filter(
+        (name) => archiveName.test(name) && name !== `${excludeRunId}.json`,
+      )
       .map((name) => {
         try {
           return {

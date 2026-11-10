@@ -175,6 +175,8 @@ export function createOrchestratorExtension(
       details: data,
     });
     let coreRef: Awaited<ReturnType<typeof createService>>["core"] | undefined;
+    /** This session's own archive: excluded from history, counted live instead. */
+    let serviceRunId: string | undefined;
     // `continuable`: the model may follow up in the same native session (cheaper than a fresh task).
     const hints = (task: TaskView, view: Record<string, unknown>) => {
       try {
@@ -535,8 +537,6 @@ export function createOrchestratorExtension(
         onEvent(event) {
           if (!active) return;
           snapshots.set(event.task.id, event.task);
-          // A fresh outcome (e.g. a quota failure) must reach the next delegation.
-          if (event.type === "settled") invalidateRecord();
           // High-frequency display events reach the session file at most every 2 s per task;
           // lifecycle events (started, settled, changes…) are always recorded.
           const frequent =
@@ -572,6 +572,7 @@ export function createOrchestratorExtension(
       })
         .then((created) => {
           coreRef = created.core;
+          serviceRunId = created.journal?.runId;
           return created;
         })
         .catch((error) => {
@@ -935,26 +936,26 @@ export function createOrchestratorExtension(
       };
     });
 
-    // Track record per engine: recent archived runs (the current one included, since
-    // every settle is checkpointed), or this session alone without persistence.
-    let recordCache:
-      | { at: number; value: ReturnType<typeof engineRecords> }
-      | undefined;
+    // Track record per engine: archived runs (other sessions, read from disk at most
+    // every 5 min; measured 16 ms for 20 runs) plus this session from memory, so a
+    // fresh outcome counts at once without blocking the TUI on disk reads.
+    let archived: { at: number; tasks: TaskView[] } | undefined;
     const trackRecord = () => {
-      if (recordCache && Date.now() - recordCache.at < 30_000)
-        return recordCache.value;
-      let tasks: Parameters<typeof engineRecords>[0] = coreRef?.list() ?? [];
-      if (stateDirectory)
+      const current = coreRef?.list() ?? [];
+      if (!stateDirectory) return engineRecords(current);
+      if (!archived || Date.now() - archived.at > 300_000) {
+        let tasks: TaskView[] = [];
         try {
-          tasks = new RunStore(stateDirectory).recentTasks(20);
+          tasks = new RunStore(stateDirectory).recentTasks(
+            20,
+            serviceRunId,
+          ) as TaskView[];
         } catch {
-          /* history is advisory; fall back to this session */
+          /* history is advisory; this session still counts */
         }
-      recordCache = { at: Date.now(), value: engineRecords(tasks) };
-      return recordCache.value;
-    };
-    const invalidateRecord = () => {
-      recordCache = undefined;
+        archived = { at: Date.now(), tasks };
+      }
+      return engineRecords([...archived.tasks, ...current]);
     };
     registerOrchestratorTools(pi, {
       get,
