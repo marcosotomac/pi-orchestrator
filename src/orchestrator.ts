@@ -97,8 +97,8 @@ export interface OrchestrationMetrics {
   boundedExpiries: number;
   /** Nested waits shortened so the caller regains control by its own soft deadline. */
   waitClamps: number;
-  /** Leaf children that waited for a slot instead of being rejected. */
-  leafQueued: number;
+  /** Children that waited for a slot instead of being rejected. */
+  childQueued: number;
   /** Children refused at full capacity (non-leaf, reject policy, or no slot could free). */
   nestedRejected: number;
   /** Tasks dispatched from a queue, and their total and longest wait there. */
@@ -173,7 +173,7 @@ export class Orchestrator {
   private metrics: OrchestrationMetrics = {
     boundedExpiries: 0,
     waitClamps: 0,
-    leafQueued: 0,
+    childQueued: 0,
     nestedRejected: 0,
     queueDispatches: 0,
     queueWaitMsTotal: 0,
@@ -185,8 +185,8 @@ export class Orchestrator {
     spendAborts: 0,
     queueExpired: 0,
   };
-  /** Leaf children waiting for a slot; dispatched before roots. */
-  private leafQueue: string[] = [];
+  /** Children waiting for a slot; dispatched before roots (their ancestors hold slots). */
+  private childQueue: string[] = [];
   readonly cwd: string;
   readonly limits: {
     maxDepth: number;
@@ -569,11 +569,13 @@ export class Orchestrator {
       throw new Error("Total task limit reached");
     const fair = this.options.queuePolicy === "fair";
     const queuedRoot = fair && callerId === null;
-    let queuedLeaf = false;
+    let queuedChild = false;
     if (!queuedRoot && this.activeCount >= this.limits.maxConcurrent) {
-      // A leaf cannot delegate, so it never holds a slot while waiting for another.
-      // It may queue only if some occupied slot can free without depending on it.
-      if (!fair || !parent || depth < this.limits.maxDepth) {
+      // A child may wait only if some running task is no ancestor of any queued
+      // task: that slot frees without depending on the queue, so the queue drains.
+      // Admission keeps this invariant; dispatch adds a running task with no queued
+      // descendants, and a freed slot goes to the queue first, so it cannot break.
+      if (!fair || !parent) {
         this.metrics.nestedRejected++;
         throw new Error(
           "Concurrency limit reached (parents count too; nested work cannot queue behind its waiting ancestors)",
@@ -585,11 +587,11 @@ export class Orchestrator {
           "Concurrency limit reached: every occupied slot waits on this task's ancestors, so no slot can free",
         );
       }
-      if (this.leafQueue.length >= this.maxQueued)
+      if (this.childQueue.length >= this.maxQueued)
         throw new Error("Child queue limit reached");
-      queuedLeaf = true;
+      queuedChild = true;
     }
-    const queued = queuedRoot || queuedLeaf;
+    const queued = queuedRoot || queuedChild;
     if (queuedRoot && this.queue.size >= this.maxQueued)
       throw new Error("Root queue limit reached");
     const token = randomBytes(32).toString("base64url");
@@ -665,9 +667,9 @@ export class Orchestrator {
         }, this.options.maxQueueWaitMs);
         entry.queueTimer.unref?.();
       }
-      if (queuedLeaf) {
-        this.leafQueue.push(view.id);
-        this.metrics.leafQueued++;
+      if (queuedChild) {
+        this.childQueue.push(view.id);
+        this.metrics.childQueued++;
       } else this.queue.push(engine, view.id);
       // Dispatched within its own admission, it never actually waited.
       this.admitting = view.id;
@@ -1338,7 +1340,7 @@ export class Orchestrator {
       maxCostUsd: this.options.maxCostUsd,
       maxTokens: this.options.maxTokens,
       tasks: this.entries.size,
-      queued: this.queue.size + this.leafQueue.length,
+      queued: this.queue.size + this.childQueue.length,
       orchestration: { ...this.metrics },
       maxTasks: this.limits.maxTasks,
       maxConcurrent: this.limits.maxConcurrent,
@@ -1350,7 +1352,7 @@ export class Orchestrator {
   }
 
   /**
-   * True when some running task is not an ancestor of any queued leaf (including
+   * True when some running task is not an ancestor of any queued child (including
    * one about to be queued under `parentId`): its slot frees without waiting on them.
    */
   private slotCanFree(parentId: string): boolean {
@@ -1362,20 +1364,21 @@ export class Orchestrator {
       }
     };
     climb(parentId);
-    for (const id of this.leafQueue) climb(this.entries.get(id)?.view.parentId);
+    for (const id of this.childQueue)
+      climb(this.entries.get(id)?.view.parentId);
     for (const { view, started } of this.entries.values())
       if (started && !isTerminal(view) && !blocked.has(view.id)) return true;
     return false;
   }
 
   private pump(): void {
-    // Leaves first: their ancestors hold slots while waiting for them.
+    // Children first: their ancestors hold slots while waiting for them.
     while (
       !this.closing &&
       this.activeCount < this.limits.maxConcurrent &&
-      this.leafQueue.length
+      this.childQueue.length
     ) {
-      const entry = this.entry(this.leafQueue.shift()!);
+      const entry = this.entry(this.childQueue.shift()!);
       if (!isTerminal(entry.view)) this.dispatch(entry, false);
     }
     while (
@@ -1432,7 +1435,9 @@ export class Orchestrator {
       if (!entry.started) {
         clearTimeout(entry.queueTimer);
         this.queue.remove(current);
-        this.leafQueue = this.leafQueue.filter((queued) => queued !== current);
+        this.childQueue = this.childQueue.filter(
+          (queued) => queued !== current,
+        );
         delete entry.launch;
         if (
           entry.resumeSessionId &&

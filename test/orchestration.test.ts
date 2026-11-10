@@ -118,7 +118,7 @@ test("with the fair queue, a leaf child waits for a slot instead of being reject
     assert.equal((await core.wait(null, second.id, 1_000)).state, "completed");
     assert.deepEqual(order, ["first", "second"]);
     const metrics = core.usage().orchestration;
-    assert.equal(metrics.leafQueued, 1);
+    assert.equal(metrics.childQueued, 1);
     assert.equal(metrics.nestedRejected, 0);
     assert.ok(metrics.queueWaitMsMax >= 10, `waited ${metrics.queueWaitMsMax}`);
   } finally {
@@ -127,32 +127,89 @@ test("with the fair queue, a leaf child waits for a slot instead of being reject
   }
 });
 
-test("a queued leaf is cancelled with its parent; children that could deadlock are rejected", async () => {
+test("any queued child is cancelled with its parent, and middle children may queue too", async () => {
   const core = make({ queuePolicy: "fair", maxConcurrent: 3, maxDepth: 3 });
   try {
     const root = core.delegate(null, "codex", "root", "root");
     const other = core.delegate(null, "codex", "other", "other");
     const middle = core.delegate(root.id, "claude", "middle", "middle");
-    assert.throws(
-      () => core.delegate(root.id, "claude", "sibling", "sibling"),
-      /nested work cannot queue/,
-      "depth 2 of 3 may delegate itself, so it never queues",
-    );
-    // `other` is not an ancestor: its slot can free, so the leaf may wait.
+    // Depth 2 of 3 can delegate, yet `other` and `middle` can free their slots.
+    const sibling = core.delegate(root.id, "claude", "sibling", "sibling");
+    assert.equal(sibling.state, "queued");
     const leaf = core.delegate(middle.id, "codex", "leaf", "leaf");
-    assert.equal(leaf.state, "queued");
+    assert.equal(
+      leaf.state,
+      "queued",
+      "`other` is no ancestor of any queued task",
+    );
     await core.cancel(null, root.id);
-    assert.equal(core.status(null, leaf.id).state, "cancelled");
-    assert.equal(core.status(null, leaf.id).runtimeProcess, undefined);
+    for (const id of [sibling.id, leaf.id]) {
+      assert.equal(core.status(null, id).state, "cancelled");
+      assert.equal(core.status(null, id).runtimeProcess, undefined);
+    }
     assert.equal(core.usage().queued, 0);
     await core.cancel(null, other.id);
-    assert.equal(core.usage().orchestration.nestedRejected, 1);
+    assert.equal(core.usage().orchestration.childQueued, 2);
+    assert.equal(core.usage().orchestration.nestedRejected, 0);
   } finally {
     await core.close();
   }
 });
 
-test("a leaf whose every occupied slot is an ancestor is rejected, not deadlocked", async () => {
+test("random delegation trees always settle: queued children never deadlock", async () => {
+  // Deterministic PRNG: failures are reproducible from the seed.
+  let seed = Number(process.env.ORCH_TREE_SEED ?? 0x2f6b1d);
+  const random = () =>
+    (seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31) / 2 ** 31;
+  let core!: Orchestrator;
+  const run = async (ctx: RuntimeContext) => {
+    const ids: string[] = [];
+    if (ctx.task.depth < 4)
+      for (let n = Math.floor(random() * 3); n > 0; n--)
+        try {
+          ids.push(
+            core.delegate(ctx.task.id, "claude", `c${random()}`, `k${random()}`)
+              .id,
+          );
+        } catch (error) {
+          assert.match(String(error), /Concurrency limit|no longer running/);
+        }
+    await delay(Math.floor(random() * 5));
+    if (ids.length) await core.waitAll(ctx.task.id, ids, 5_000);
+    return "ok";
+  };
+  core = make({
+    queuePolicy: "fair",
+    maxConcurrent: 3,
+    maxDepth: 4,
+    maxTasks: 400,
+    maxQueued: 64,
+    run,
+    child: run,
+  });
+  try {
+    const roots = Array.from({ length: 12 }, (_, i) =>
+      core.delegate(null, "codex", `root ${i}`, `root-${i}`),
+    );
+    const settled = await core.waitAll(
+      null,
+      roots.map((root) => root.id),
+      20_000,
+    );
+    assert.ok(settled.every((task) => task.state === "completed"));
+    assert.ok(core.list().every((task) => task.state === "completed"));
+    assert.equal(core.usage().queued, 0);
+    assert.equal(core.usage().activeSlots, 0);
+    assert.ok(
+      core.usage().orchestration.childQueued > 0,
+      "the queue was exercised",
+    );
+  } finally {
+    await core.close();
+  }
+});
+
+test("a child whose every occupied slot is an ancestor is rejected, not deadlocked", async () => {
   const core = make({ queuePolicy: "fair", maxConcurrent: 2, maxDepth: 3 });
   try {
     const root = core.delegate(null, "codex", "root", "root");
@@ -250,7 +307,7 @@ test("/orch usage reports every orchestration counter", async () => {
     const report = usageReport(core.usage(), core.list());
     for (const label of [
       "Orquestación:",
-      "subtareas hoja en cola",
+      "subtareas en cola",
       "subtareas rechazadas",
       "caducadas en cola",
       "cortadas por el plazo del padre",

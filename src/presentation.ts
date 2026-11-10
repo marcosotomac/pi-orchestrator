@@ -1010,7 +1010,7 @@ export function orchestrationLines(metrics: OrchestrationMetrics): string[] {
     : 0;
   return [
     "Orquestación:",
-    `  Cola: ${m.queueDispatches} esperaron una plaza (media ${span(average)}, máx. ${span(m.queueWaitMsMax)}) · ${m.leafQueued} subtareas hoja en cola · ${m.nestedRejected} subtareas rechazadas · ${m.queueExpired} caducadas en cola`,
+    `  Cola: ${m.queueDispatches} esperaron una plaza (media ${span(average)}, máx. ${span(m.queueWaitMsMax)}) · ${m.childQueued} subtareas en cola · ${m.nestedRejected} subtareas rechazadas · ${m.queueExpired} caducadas en cola`,
     `  Plazos: ${m.boundedExpiries} subtareas cortadas por el plazo del padre · ${m.waitClamps} esperas anidadas acortadas`,
     `  Esperas: ${m.waitCalls} llamadas para ${m.waitedTasks} tareas${m.waitCalls ? ` (${(m.waitedTasks / m.waitCalls).toFixed(1)} por llamada)` : ""}`,
     `  Despertares del modelo: ${m.batchWakes} por lote terminado · ${m.earlyFailureWakes} anticipados por fallo${m.spendAborts ? ` · ${m.spendAborts} cancelaciones por tope de gasto` : ""}`,
