@@ -2,8 +2,8 @@
 const { createInterface } = require("node:readline");
 const assert = require("node:assert/strict");
 const scenario = process.env.ORCH_ACP_FIXTURE_CASE || "success";
-const send = (value) =>
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...value }) + "\n");
+const encode = (value) => JSON.stringify({ jsonrpc: "2.0", ...value }) + "\n";
+const send = (value) => process.stdout.write(encode(value));
 let token, promptId;
 // After a denied operation a real agent answers without it and ends the turn.
 const finishAfterDenial = () => {
@@ -299,16 +299,22 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         },
       });
       if (scenario === "malformed") return process.stdout.write("{not JSON}\n");
-      send({
+      const final = encode({
         id,
         result: {
           stopReason: scenario === "bad-stop" ? "max_tokens" : "end_turn",
         },
       });
-      if (scenario === "duplicate")
-        send({ id, result: { stopReason: "end_turn" } });
-      if (scenario === "trailing") process.stdout.write("invalid tail\n");
-      return;
+      // One write (atomic below PIPE_BUF): the client stops us with SIGTERM as soon
+      // as it reads the final response, and Node does not defer SIGTERM, so a second
+      // write could be lost under load and the client would never see the anomaly.
+      return process.stdout.write(
+        scenario === "duplicate"
+          ? final + encode({ id, result: { stopReason: "end_turn" } })
+          : scenario === "trailing"
+            ? final + "invalid tail\n"
+            : final,
+      );
     }
     if (id === "yolo-approval") {
       if (["yolo-success", "yolo-duplicate"].includes(scenario)) {
