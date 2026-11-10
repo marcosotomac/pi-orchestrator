@@ -177,3 +177,7 @@ Sin variables se conservan los modelos predeterminados de cada runtime. Codex re
 En `main` casi todos los hijos se rechazaban por falta de plaza; con la cola de hijos terminan todos. El perfil de CPU mostró que `spend()` consumía ~78 % del tiempo (se recorría en cada admisión aunque no hubiera topes); tras quitarlo y hacer incremental la comprobación de deadlock, el coste por tarea es constante. Son ejecuciones locales únicas en un Mac, no garantías de throughput.
 
 `trackRecord` con 20 runs × 30 tareas: 13–16 ms leyendo de disco en cada llamada → 0,42 ms con el historial de otros runs en caché (5 min) y la sesión actual en memoria.
+
+### A/B con agentes reales (pendiente de ejecutar; consume cuota)
+
+`ORCH_BENCH_LIVE=1 npm run bench:nested-live -- codex 2` en cada checkout (`main` y la rama). Un padre real delega tres hijos (uno lee un archivo inexistente y falla), los espera y responde. El reporte (`artifacts/bench-nested-REVISIÓN-*.json`) registra estado, tiempo total, marcas encontradas, estados de los hijos, tokens del padre y de los hijos, peticiones MCP del padre (aproximación a sus turnos, comparable entre revisiones) y, donde existen, los contadores de orquestación. **No tiene tope monetario duro.**

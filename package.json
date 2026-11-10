@@ -28,7 +28,8 @@
     "bench:live": "tsx scripts/bench-live.ts",
     "verify": "npm run verify:offline && npm run test:tui",
     "verify:live": "npm run verify && tsx scripts/live-matrix.ts",
-    "bench:scheduling": "tsx scripts/benchmark-scheduling.ts"
+    "bench:scheduling": "tsx scripts/benchmark-scheduling.ts",
+    "bench:nested-live": "tsx scripts/bench-nested-live.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
